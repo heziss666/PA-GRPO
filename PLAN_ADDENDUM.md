@@ -2,6 +2,8 @@
 
 > **用途**：本文件是 `Permutation_GRPO_Project_Plan.md` 的补充说明，重点处理在阅读 PA-GRPO 官方代码后发现的论文—代码一致性问题，以及正式训练前必须完成的 CPU 单测与工程加固。
 >
+> **研究范围补充**：Pairwise 主线的数据单位、`original_question_id` / `pair_id` 契约及 MCQ 可选扩展边界见 [`PLAN_ADDENDUM_PAIRWISE_SCOPE_AND_MCQ_EXTENSION.md`](PLAN_ADDENDUM_PAIRWISE_SCOPE_AND_MCQ_EXTENSION.md)。
+>
 > **适用上游**：`ECNU-Text-Computing/PA-GRPO`
 >
 > **固定官方 commit**：`0ee9abd903cb4ac4945f1176e943d20436470096`

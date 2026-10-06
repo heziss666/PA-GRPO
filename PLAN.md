@@ -9,6 +9,8 @@
 > Pilot 模型：Qwen2.5-1.5B-Instruct
 >
 > 推荐基础代码：PA-GRPO 官方仓库（基于 verl），在其上最小侵入地加入 EIS 与自定义方法
+>
+> Pairwise 主线与 MCQ 扩展边界见 [`PLAN_ADDENDUM_PAIRWISE_SCOPE_AND_MCQ_EXTENSION.md`](PLAN_ADDENDUM_PAIRWISE_SCOPE_AND_MCQ_EXTENSION.md)。其中“一题一个固定 Judge pair”及 MCQ 仅作为可选扩展的约束适用于 controlled main experiments。
 
 ---
 
