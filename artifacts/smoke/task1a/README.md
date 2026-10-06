@@ -53,8 +53,11 @@ four generated tokens is not a research baseline.
 
 - The environment intentionally does not install the full Ray/verl/vLLM stack.
 - `torch` is CPU-only in this smoke environment.
-- The current direct parser is permissive: text such as `invalid` can be
-  interpreted as `A`; this is tracked by the paper–code fidelity audit.
-- The evaluator recorded `num_options=4` for this A/B parquet. This does not
-  prevent the pairwise scorer from running, but option-count detection must be
-  hardened before formal evaluation.
+- The official direct parser remains permissive: text such as `invalid` can be
+  interpreted as `A`. Controlled experiments use
+  `--evaluation_contract controlled`, whose direct parser accepts only a bare
+  legal answer letter.
+- The official evaluator recorded `num_options=4` for this A/B parquet because
+  it checks only the first prompt and does not handle parquet `numpy.ndarray`
+  prompts. Controlled evaluation scans every row and requires a consistent
+  explicit option contract, or an explicit `--num_options 2|4` override.
