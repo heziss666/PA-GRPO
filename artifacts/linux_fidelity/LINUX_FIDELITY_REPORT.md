@@ -4,8 +4,9 @@
 
 - Repository: `heziss666/PA-GRPO`
 - Harness commit: `f4f801ebed5056ab6cd72ce8d6fabb7f1743759d`
+- Task 2B integration commit: `82049c42edcc74393a09ed02141a7e663094054e`
 - Pinned PA upstream commit: `0ee9abd903cb4ac4945f1176e943d20436470096`
-- Date checked: 2026-10-05
+- Date checked: 2026-10-06
 - Runtime: Ubuntu 24.04.5 LTS on WSL2, Python 3.12.3
 - PyTorch: 2.6.0+cpu
 - Ray: 2.49.0
@@ -13,8 +14,9 @@
 - Execution device: CPU tensors; GPU visibility was checked independently
 - vLLM: not installed, because this synthetic advantage confirmation does not use rollout inference
 
-This report covers Task 2A only. It does not claim that vLLM, FSDP, LoRA,
-full GRPO training, or an 8B model has run.
+This report covers Task 2A and the CPU/WSL integration harness for Task 2B. It
+does not claim that a real vLLM process, FSDP, LoRA, full GRPO training, or an
+8B model has run.
 
 ## Path-execution proof
 
@@ -121,17 +123,74 @@ token counts. It preserves the optional strict sigma gate but does not invent a
 default threshold. The official-compatible helper remains available only for
 characterization and reproduction comparisons.
 
+For Task 2B, `permstudy.rollout_identity` now derives controlled pair identity
+from dataset metadata at the DataProto boundary. It accepts `pair_id` or
+`original_question_id` and `permutation_id` or `permutation`; it deliberately
+does not use `index // 2` as a controlled fallback.
+
+The real Trainer path now performs the following sequence when
+`grouping.identity_mode=explicit`:
+
+```text
+dataset extra_info
+-> pair_id / permutation_id in DataProto.non_tensor_batch
+-> repeat(n, interleave=True)
+-> rollout_slot = [0, ..., n-1] for every permutation input
+-> snapshot identity before generate_sequences()
+-> compare vLLM RequestOutput.prompt_token_ids with input prompt order
+-> assert returned DataProto preserved identity metadata order
+-> repeat the reward-side batch with the same identity
+-> DataProto.union()
+-> balance/reorder (all non-tensor identity arrays reorder together)
+-> BatchRewardManager
+-> consistency pairing by (pair_id, rollout_slot)
+```
+
+For diagnostic calls with `return_dict=True`, an incomplete controlled key is
+exposed through the per-sample `consistency_unpaired` field. The production
+reward path records it through the `reward/consistency_unpaired_rate`
+TensorBoard metric and a `PAIR_UNPAIRED` log record. A duplicate
+`(pair_id, permutation_id, rollout_slot)` raises
+`DuplicateRolloutKeyError` instead of being overwritten.
+
+`grouping.identity_mode=legacy_index` remains the default. In that mode the
+identity helpers are no-ops, the original repeat behavior is used, and the
+Judge reward retains the official index/appearance-order pairing behavior.
+Controlled training must opt in explicitly, for example:
+
+```bash
+bash scripts/run_judge_llama.sh grouping.identity_mode=explicit
+```
+
+The explicit path currently supports synchronous vLLM rollout and the GRPO
+path used by this project. Async rollout, REMAX, and non-vLLM backends such as
+SGLang fail before generation with a clear `NotImplementedError`; their
+auxiliary output/baseline paths have not yet been integrated with the
+three-part identity or equivalent backend-order validation. Conflicting
+Trainer/reward identity-mode settings—including custom reward kwargs—and
+non-batch reward managers also fail fast.
+
+The WSL tests execute the real DataProto, Trainer `_get_gen_batch`,
+`DataProto.repeat`, `DataProto.reorder`, `BatchRewardManager`, and both Judge
+reward modules. They also exercise the production vLLM prompt-order validator
+with aligned and misordered RequestOutput-shaped objects. Because vLLM is
+intentionally not installed in this WSL environment, a real GPU/vLLM
+generation-process smoke is still required on AutoDL; the production vLLM path
+will fail closed if actual output prompt order or identity metadata disagrees.
+
 ## Project decision
 
 1. Treat response-length dependence as confirmed for the pinned official path.
 2. Keep PA-Official behavior unchanged for sanity reproduction.
 3. Use the response-level paper implementation for controlled PA/EIS/ALC
    comparisons.
-4. Do not modify vendored `verl` as part of this audit.
-5. Do not begin Task 2B Trainer integration until this report is reviewed and
-   confirmed by the user.
-6. Do not begin EIS/ALC or large-scale training before Task 2B identity
-   propagation and controlled evaluator tests are complete.
+4. Keep the vendored `verl` change limited to the Task 2B dispatch points:
+   DataProto identity attachment/repeat, vLLM output-order validation, config
+   routing, and reward-manager metadata transfer.
+5. Treat Task 2B code integration as complete only for the CPU/WSL harness;
+   run a real vLLM smoke on AutoDL before formal GRPO training.
+6. Do not begin EIS/ALC or large-scale training before the controlled evaluator
+   work and the AutoDL vLLM smoke are reviewed.
 
 ## Reproduction
 
@@ -139,7 +198,16 @@ characterization and reproduction comparisons.
 python -m pytest tests_permstudy/test_linux_official_advantage.py -q
 python scripts_permstudy/linux_fidelity/run_official_advantage_fidelity.py \
   --git-commit f4f801ebed5056ab6cd72ce8d6fabb7f1743759d
+
+# Task 2B Linux integration and configuration checks
+python -m pytest tests_permstudy \
+  tests/special_sanity/test_config_docs.py \
+  tests/trainer/config/test_legacy_config_on_cpu.py -q
 ```
+
+Task 2B verification observed `40 passed` on WSL/Linux. The Windows smoke
+environment observed `17 passed, 19 skipped`; the skipped cases are the
+documented Linux/verl integration tests.
 
 Machine-readable results:
 
