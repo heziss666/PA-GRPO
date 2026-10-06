@@ -1,6 +1,6 @@
 # Controlled Training Data Pipeline Design
 
-**Status:** Design revision submitted for second review; implementation not approved
+**Status:** Design approved subject to final minor-diff confirmation; implementation not started
 
 **Branch:** `codex/data-pipeline-plan`
 
@@ -539,15 +539,15 @@ permstudy/data_pipeline/
 Command-line entry points are planned as:
 
 ```text
-scripts_permstudy/prepare_questions.py
-scripts_permstudy/plan_generation.py
-scripts_permstudy/generate_candidates.py
-scripts_permstudy/verify_candidates.py
-scripts_permstudy/build_reasoning_pairs.py
-scripts_permstudy/build_permutations.py
-scripts_permstudy/audit_generator_distribution.py
-scripts_permstudy/validate_dataset.py
-scripts_permstudy/run_fake_e2e.py
+scripts_permstudy/data/prepare_questions.py
+scripts_permstudy/data/plan_generation.py
+scripts_permstudy/data/generate_candidates.py
+scripts_permstudy/data/verify_candidates.py
+scripts_permstudy/data/build_reasoning_pairs.py
+scripts_permstudy/data/build_permutations.py
+scripts_permstudy/data/audit_generator_distribution.py
+scripts_permstudy/data/validate_dataset.py
+scripts_permstudy/data/run_fake_e2e.py
 ```
 
 Schemas use frozen dataclasses and explicit validators; Phase 1 does not add a schema framework.

@@ -654,28 +654,34 @@ semantic winner 始终是 `pos`。
 
 ## 7.4 正确性验证
 
+正式 verification 与 audit contract 以 [`controlled-training-data-pipeline-design.md`](docs/superpowers/specs/2026-10-06-controlled-training-data-pipeline-design.md) 的 Verification、Human verifier audit 和 Gates 章节为准。本节只保留摘要。
+
 ### ReClor
 
-最终答案为离散选项，直接 canonicalize 后精确比较。
+- gold 直接使用 official label 并 canonicalize 为 `A/B/C/D`，不得从 prompt 文本推断；
+- candidate 必须且只能包含一个合法 terminal `Final Answer: X`；
+- 使用 `reclor_exact_match` 做严格比较。
 
 ### MATH
 
-必须实现独立 verifier，不允许只做裸字符串比较。
+- 只从规定的 strict final-answer region 提取 terminal boxed answer；
+- 固定使用 `math-verify==0.9.0` 做解析与等价性判断；
+- gold 以 question-level cache 解析一次，失败则整题标记 `gold_verification_error`；
+- 只有 gold 与 prediction 都成功解析且明确不等价时，才可标记 `incorrect`。
 
-最低要求：
+统一 candidate verification 状态为：
 
-- 清除 `\\boxed{}` / `Answer:` 等 wrapper；
-- 规范空格、LaTeX；
-- 分数 / 小数等价处理；
-- 常见数值表达 canonicalization；
-- 能使用可靠 math verifier 库则优先使用；
-- 随机抽查至少 100 个自动判定样本。
+```text
+correct / incorrect / invalid / ambiguous / error
+```
 
-如果自动 verifier 在 MATH 上误判率明显，则第一版主训练可先提高 ReClor 占比，MATH 作为第二阶段加入。
+Audit 必须全查 `invalid / ambiguous / error / gold_verification_error`，并对 `correct / incorrect` 按 `source x generator x status`、`audit_seed=42` 分层抽样。任何复核确认的 false correct / false incorrect 均触发 Statistical Gate `FAIL`：修复 verifier 后重跑 verification、audit、pair 和 permutation，不重新生成 candidates，也不得通过改变 source 占比绕过。
 
 ---
 
 ## 7.5 Split 规则
+
+正式 question identity、deduplication、90/10 deterministic split、stratification fallback 和 `split_manifest_hash` contract 以 [`controlled-training-data-pipeline-design.md`](docs/superpowers/specs/2026-10-06-controlled-training-data-pipeline-design.md) 为准。
 
 **按原始 question_id 切分，而不是按 pair 切分。**
 
