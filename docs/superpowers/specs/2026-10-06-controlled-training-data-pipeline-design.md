@@ -23,7 +23,9 @@ Phase 1 must not:
 - expand to a 200-pair pilot;
 - commit real source text, real model responses, real gold answers, private manifests, secrets, or machine-specific absolute paths.
 
-After this design is independently reviewed, a separate detailed implementation plan will be written. No implementation work is authorized by this document alone.
+Phase 1 dependencies live in a dedicated exact-pin `requirements-data-pipeline-phase1.txt`. The paper-reproduction `requirements-lock.txt`, the base training requirements, and the existing Windows evaluator-smoke requirements remain unchanged.
+
+The separate detailed plan is maintained at `docs/superpowers/plans/2026-10-06-controlled-training-data-pipeline-phase1.md`. No implementation work begins until that plan's review is approved.
 
 ## 2. Stage boundary
 
@@ -84,7 +86,8 @@ Only a Phase 2 `PASS` permits the 200-pair pilot. `PASS_WITH_WARNINGS` requires 
 - ReClor is restricted to the current non-commercial research use.
 - Official ReClor validation and test data do not participate in the internal split.
 - Raw archives, extracted records, derived full-text manifests, and verified pools remain outside Git.
-- Local acquisition accepts a runtime directory or archive path, but the path exists only in environment configuration and private manifests.
+- Phase 1 local acquisition accepts an already extracted runtime directory only. Archive extraction/password handling is deferred; the directory path exists only in environment configuration and private manifests.
+- The private source snapshot hashes `train.json`, `val.json`, `test.json`, and `use_items.txt` in a canonical relative-file tree manifest and records `tree_manifest_hash`. Validation/test files participate only in snapshot integrity and never produce training records.
 
 ### 3.3 Runtime configuration
 
@@ -93,7 +96,6 @@ Public documentation and committed configuration use placeholders only:
 ```ini
 PAGRPO_DATA_ROOT=<external-data-root>
 PAGRPO_RECLOR_DIR=<external-reclor-directory>
-PAGRPO_RECLOR_ARCHIVE=<external-reclor-archive>
 ```
 
 Real local absolute paths are permitted as runtime inputs, but they must never be written to committed configuration, public artifacts, sanitized manifests, or public logs.
@@ -272,6 +274,8 @@ Successful candidate records are append-only. Failures are appended separately. 
 
 Historical failures do not lower final generation completion after a later retry succeeds.
 
+Interrupted and uninterrupted execution are compared using the successful composite-key set and a canonical semantic candidate-set hash. That hash sorts successful records by composite key and covers their semantic candidate payload while excluding append order, timestamps, retry counts, failure history, record hashes, and physical paths. Physical execution-history manifest hashes may legitimately differ.
+
 The shard manifest pins at least the model repository and immutable revision, backend, prompt template revision/hash, full sampling configuration, question/split manifest hash, shard ID, and planned count.
 
 OOM is a recoverable failure record and never rolls back completed candidates. However, if resolving OOM changes batch size, tensor parallelism, maximum model length, memory utilization, or any other generation configuration, the old run is preserved and a new `generation_run_id` is mandatory. Resume of the old run is allowed only when the complete pinned configuration is unchanged.
@@ -282,7 +286,7 @@ Manifests are written to a temporary file in the same directory, flushed and fsy
 
 On recovery:
 
-- an incomplete final JSONL line is quarantined and resume may continue;
+- an incomplete final JSONL suffix is copied to a private quarantine file and fsynced, then the source is truncated and fsynced at its last complete LF before resume may append;
 - a malformed middle line is an integrity failure;
 - all referenced upstream artifacts must match the hashes pinned by their manifest.
 
@@ -312,7 +316,7 @@ ambiguous
 error
 ```
 
-A question-level `gold_verification_error` removes the complete question from pair construction. Only `correct` and `incorrect` candidates can enter the pair pool.
+A question-level `gold_verification_error` removes the complete question from pair construction. It is stored once in a separate question-verification record, never duplicated as candidate `error` records. Only `correct` and `incorrect` candidates can enter the pair pool.
 
 ### 8.1 ReClor
 
@@ -332,9 +336,9 @@ MATH candidates must expose one terminal boxed answer in the prescribed final-an
 
 `incorrect` is assigned only if gold parsing succeeds, candidate parsing succeeds, and the verifier explicitly establishes non-equivalence. Multiple parsed expressions or uncertain symbolic comparison are `ambiguous`; timeout or library exception is `error`.
 
-Gold is parsed once per question and cached for all candidates. Gold failure yields `gold_verification_error` for the question. Each candidate comparison has an independent recorded timeout.
+Gold is parsed once per question and cached for all candidates during normal execution. A worker must complete an explicit `GOLD_READY`/`GOLD_ERROR` handshake under a parent-enforced gold timeout before it may receive candidate work. Gold error or timeout yields one `gold_verification_error` record and stops the question. Each candidate comparison then has an independent parent-enforced timeout; restarting a worker after candidate timeout may reparse gold.
 
-Verification records contain run and candidate identifiers, verifier name/version, parser version, gold and prediction parse status, canonical representations where privately allowed, verification status, timeout, and sanitized error type. ReClor uses `reclor_exact_match`; it must not be labeled as `math-verify`.
+Candidate verification records contain run and candidate identifiers, verifier name/version, parser version, prediction parse status, canonical prediction where privately allowed, verification status, timeout, and sanitized error type. Separate question verification records contain verification run ID, question ID, source, gold parse status, canonical gold where privately allowed, and sanitized error type. ReClor uses `reclor_exact_match`; it must not be labeled as `math-verify`.
 
 ## 9. Response canonicalization and deterministic pair selection
 
@@ -404,7 +408,7 @@ UNSURE
 
 An apparent false `correct` or false `incorrect` receives a second review of the source item, gold, candidate, parser output, and verifier result. A confirmed `DISAGREE` causes the Statistical Gate to fail. `UNSURE` enters a separate review queue and is not counted as a confirmed verifier error.
 
-Audit records include `generation_run_id`, `verification_run_id`, candidate ID, source, generator, machine status, audit seed, verdict, and reason code. Reason codes include:
+Audit accepts both candidate verification records and question-level gold verification records. A gold error is audited exactly once by question identity and does not acquire a synthetic candidate or generator identity. Audit records include `generation_run_id`, `verification_run_id`, record kind, question ID, optional candidate ID, source, optional generator/machine status, audit seed, verdict, and reason code. Reason codes include:
 
 ```text
 missing_final_marker
@@ -456,7 +460,7 @@ invalid_error_rate(generator, source)
   / # successfully generated candidates in that generator/source cell
 ```
 
-At 100% real-smoke generation completion, the cell denominator is `20 questions x 2 samples = 40`. Historical failed attempts and missing candidates are not included in this denominator; unresolved missing candidates independently fail the 100% completion requirement.
+At 100% real-smoke generation completion, the cell denominator is `20 questions x 2 samples = 40`. Both numerator and denominator are candidate-level only; question-level `gold_verification_error` records never enter generator/source rates. Historical failed attempts and missing candidates are not included in this denominator; unresolved missing candidates independently fail the 100% completion requirement.
 
 Generator dominance uses only representatives in final selected pairs:
 
@@ -550,6 +554,8 @@ scripts_permstudy/data/validate_dataset.py
 scripts_permstudy/data/run_fake_e2e.py
 ```
 
+`prepare_questions.py` has three explicit subcommands. `acquire-reclor` and `acquire-math` each create one immutable source manifest; `build-split` requires both manifests and produces the single unified two-source split/smoke manifest. Phase 1 exposes `--reclor-dir` only, not an archive argument.
+
 Schemas use frozen dataclasses and explicit validators; Phase 1 does not add a schema framework.
 
 Each layer records `run_id`, `schema_version`, direct upstream manifest hash, its own configuration hash, and output manifest hash. A layer may read only:
@@ -570,18 +576,18 @@ Phase 1 tests must cover:
 - split inheritance and prevention of cross-split candidates, pairs, and permutations;
 - resolved-path repository containment, symlink/junction, case, cache, and redaction checks;
 - generation planning, backend-neutral candidate IDs, fake backend behavior, and lazy vLLM import;
-- append-only resume, historical failure then success, incomplete-tail recovery, malformed-middle failure, record hashes, and stale-lock recovery rules;
+- append-only resume, historical failure then success, durable incomplete-tail quarantine/truncation, malformed-middle failure, record hashes, and stale-lock recovery rules;
 - ReClor terminal marker parsing and official-label handling;
-- MATH gold caching, strict terminal extraction, equivalence, ambiguity, timeout, and errors with `math-verify==0.9.0`;
+- MATH gold handshake/caching, question-level gold records, strict terminal extraction, equivalence, ambiguity, separate gold/candidate timeout, and errors with `math-verify==0.9.0`;
 - response normalization, deduplication, fixed-tokenizer length measurement, tie-breaking, run-scoped pair IDs, and canonical pair hashes;
 - exact AB/BA permutation semantics and lineage;
 - deterministic audit sampling, verdicts, and reason codes;
 - all Gate thresholds and status transitions;
-- equivalent canonical hashes on Windows and Linux/WSL.
+- equivalent semantic candidate-set and downstream canonical hashes on Windows and Linux/WSL; physical execution-history manifests may differ after interruption.
 
 Two end-to-end paths are required:
 
-1. a committed, explicitly marked synthetic fixture that runs acquisition-like loading through fake generation, verification, audit, pairing, permutation, and gates on Windows/WSL;
+1. a committed, explicitly marked 80-question synthetic source fixture (40 MATH and 40 ReClor, with ten ReClor labels per option) that runs 90/10 split, deterministic 20+20 train smoke selection, fake generation, verification, audit, pairing, permutation, and gates on Windows/WSL;
 2. a private real-source acquisition and split followed by the fake full pipeline, with all full-text artifacts outside Git.
 
 ## 15. Phase 1 acceptance criteria
@@ -589,11 +595,11 @@ Two end-to-end paths are required:
 Phase 1 may report `DATA_PIPELINE_SYSTEM_READY` only when all of the following are true:
 
 - the design and detailed implementation plan have been independently reviewed before implementation;
-- source acquisition records immutable MATH revision and ReClor file hashes privately;
+- source acquisition records immutable MATH revision and ReClor four-file tree-manifest hashes privately;
 - the production data root and effective model caches are external and pass resolved-path isolation checks;
 - question identities, source-local deduplication, deterministic 90/10 split, and split manifest are reproducible;
 - the fake 40-question/240-candidate plan completes end to end;
-- interruption and resume yield the same successful candidate set and canonical manifest hashes as an uninterrupted run;
+- interruption and resume yield the same successful composite candidate set and canonical semantic candidate-set hash as an uninterrupted run; physical failure-history manifests need not match;
 - importing the generation package succeeds without vLLM installed;
 - MATH verification pins `math-verify==0.9.0`;
 - pair and permutation outputs are deterministic and hash-stable;
@@ -607,4 +613,4 @@ Passing these criteria proves that the data-production system is ready for real 
 
 ## 16. Review checkpoint
 
-This commit is intentionally design-only. After review approval, the next deliverable is a detailed, stepwise implementation plan with test-first checkpoints. No production pipeline code or real generation should begin before that approval.
+The design is approved and the detailed implementation plan is under review. No production pipeline code or real generation begins until the plan review is approved.

@@ -41,7 +41,8 @@ splits/{split_run_id}/manifest.json
 generation/{generation_run_id}/{generator_id}/{shard_id}/candidates.jsonl
 generation/{generation_run_id}/{generator_id}/{shard_id}/failures.jsonl
 generation/{generation_run_id}/{generator_id}/{shard_id}/manifest.json
-verification/{verification_run_id}/records.jsonl
+verification/{verification_run_id}/candidate_records.jsonl
+verification/{verification_run_id}/question_records.jsonl
 verification/{verification_run_id}/manifest.json
 audit/{audit_run_id}/selection.jsonl
 audit/{audit_run_id}/decisions.jsonl
@@ -165,14 +166,22 @@ class VerificationRecord:
     source: Source
     generator_id: str
     verification_status: VerificationStatus
-    gold_parse_status: str
     prediction_parse_status: str
-    canonical_gold: str | None
     canonical_prediction: str | None
     verifier_name: str
     verifier_version: str
     parser_version: str
     verifier_timeout_seconds: float
+    error_type: str | None
+
+
+@dataclass(frozen=True)
+class QuestionVerificationRecord:
+    verification_run_id: str
+    original_question_id: str
+    source: Source
+    gold_parse_status: str
+    canonical_gold: str | None
     error_type: str | None
 
 
@@ -220,10 +229,13 @@ class AuditSelectionRecord:
     audit_run_id: str
     generation_run_id: str
     verification_run_id: str
-    candidate_id: str
+    record_kind: str
+    original_question_id: str
+    candidate_id: str | None
     source: Source
-    generator_id: str
-    verification_status: VerificationStatus
+    generator_id: str | None
+    verification_status: VerificationStatus | None
+    gold_parse_status: str | None
     reason_code: str
 
 
@@ -232,28 +244,30 @@ class AuditDecision:
     audit_run_id: str
     generation_run_id: str
     verification_run_id: str
-    candidate_id: str
+    record_kind: str
+    original_question_id: str
+    candidate_id: str | None
     verdict: AuditVerdict
     reason_code: str
     confirmed_disagree: bool
 ```
 
-`record_hash` is added and validated by the I/O layer over every serialized record; it is not an input to the frozen business record constructors.
+`QuestionVerificationRecord.gold_parse_status` accepts only `ok` or `gold_verification_error`. Candidate-level `VerificationRecord` never duplicates a gold failure: if gold fails, emit one question record, emit no candidate verification records for that question, and exclude it from pair construction. `AuditSelectionRecord.record_kind` is exactly `candidate` or `question_gold`; the latter has `candidate_id=None`, `generator_id=None`, `verification_status=None`, and carries the question gold status. `record_hash` is added and validated by the I/O layer over every serialized record; it is not an input to the frozen business record constructors.
 
 Module-local immutable result types are also fixed:
 
 - `IsolationReport(repo_root_hash, data_root_hash, effective_cache_kinds)` contains hashes/kinds only, never raw paths.
-- `JsonlScan(records, quarantined_tail_path, file_sha256)` returns validated dictionaries and a private path object.
+- `JsonlScan(records, quarantined_tail_path, file_sha256)` returns validated dictionaries and a private path object after any incomplete tail has been durably quarantined and removed from the source JSONL.
 - `SourceSnapshot(source, source_revision, source_snapshot_id, questions, private_manifest)` carries `QuestionRecord` values.
 - `SplitBuildResult(assignments, stratification_level_by_source, fallback_reasons, split_manifest_hash)`.
 - `GenerationConfig` contains backend, generator/model IDs and revisions, prompt revision/hash, sampling values, batch size, tensor parallel size, max model length, GPU memory utilization, samples per question, and split manifest hash.
 - `GenerationResult(plan, response, finish_reason, generated_token_count, error_type)`.
-- `GenerationPlan(generation_run_id, config_hash, candidates, shard_ids)` and `ShardRunSummary(planned, successful, historical_failures, missing, manifest_hash)`.
+- `GenerationPlan(generation_run_id, config_hash, candidates, shard_ids)` and `ShardRunSummary(planned, successful, historical_failures, missing, manifest_hash, semantic_candidate_set_hash)`.
 - `ParsedAnswer(status, answer, error_type)` and `BoxedAnswer(status, boxed_text, error_type)`.
 - `ResponseGroup(response_hash, representative_key, member_keys, member_generators, verification_status)`.
 - `AuditSummary(required_count, completed_count, verdict_counts, confirmed_disagreements, systematic_issue)`.
-- `GateInputs(plans, candidates, verifications, pairs, audit_summary)` plus `FunctionalGateReport(passed, failures, metrics)` and `StatisticalGateReport(status, hard_failures, warnings, diagnostics)`.
-- `FakeE2ESummary(run_ids, manifest_hashes, counts, phase_status, real_generation_performed)`.
+- `GateInputs(plans, candidates, verifications, question_verifications, pairs, audit_summary)` plus `FunctionalGateReport(passed, failures, metrics)` and `StatisticalGateReport(status, hard_failures, warnings, diagnostics)`.
+- `FakeE2ESummary(run_ids, semantic_candidate_set_hash, downstream_manifest_hashes, counts, phase_status, real_generation_performed)`.
 
 ---
 
@@ -264,13 +278,10 @@ Module-local immutable result types are also fixed:
 - Create: `permstudy/data_pipeline/schema.py`
 - Create: `tests_permstudy/data_pipeline/__init__.py`
 - Create: `tests_permstudy/data_pipeline/test_schema.py`
-- Modify: `requirements.txt`
-- Modify: `requirements-lock.txt`
-- Modify: `requirements-windows-smoke.txt`
-- Modify: `setup.py`
+- Create: `requirements-data-pipeline-phase1.txt`
 
 **Interfaces:**
-- Produces: `Source`, `Split`, `VerificationStatus`, `AuditVerdict`, `GateStatus`, `ArtifactRef`, `RunManifest`, `QuestionRecord`, `SplitAssignment`, `CandidatePlan`, `CandidateRecord`, `FailureRecord`, `VerificationRecord`, `PairRecord`, `PermutationRecord`, `AuditSelectionRecord`, `AuditDecision`.
+- Produces: `Source`, `Split`, `VerificationStatus`, `AuditVerdict`, `GateStatus`, `ArtifactRef`, `RunManifest`, `QuestionRecord`, `SplitAssignment`, `CandidatePlan`, `CandidateRecord`, `FailureRecord`, `VerificationRecord`, `QuestionVerificationRecord`, `PairRecord`, `PermutationRecord`, `AuditSelectionRecord`, `AuditDecision`.
 - Produces: every record's `validate() -> None`, `to_dict() -> dict[str, object]`, and matching `from_dict()` classmethod.
 
 - [ ] **Step 1: Write failing schema and dependency tests**
@@ -281,7 +292,12 @@ from importlib.metadata import version
 
 import pytest
 
-from permstudy.data_pipeline.schema import CandidatePlan, Source, Split
+from permstudy.data_pipeline.schema import (
+    CandidatePlan,
+    QuestionVerificationRecord,
+    Source,
+    Split,
+)
 
 
 def test_candidate_plan_is_frozen_and_uses_composite_key():
@@ -306,6 +322,18 @@ def test_candidate_plan_is_frozen_and_uses_composite_key():
 
 def test_math_verify_is_exactly_pinned():
     assert version("math-verify") == "0.9.0"
+
+
+def test_gold_error_is_a_single_question_level_state():
+    record = QuestionVerificationRecord(
+        verification_run_id="verify_abc",
+        original_question_id="math:train:" + "a" * 40,
+        source=Source.MATH,
+        gold_parse_status="gold_verification_error",
+        canonical_gold=None,
+        error_type="math_parse_failure",
+    )
+    record.validate()
 ```
 
 - [ ] **Step 2: Run tests and confirm the intended failures**
@@ -320,19 +348,25 @@ Expected: collection fails because `permstudy.data_pipeline.schema` does not exi
 
 - [ ] **Step 3: Pin dependencies and install the Windows Phase 1 set**
 
-Use exact declarations:
+Create a dedicated, exact Phase 1 dependency set and leave `requirements.txt`, `requirements-lock.txt`, `requirements-windows-smoke.txt`, and `setup.py` unchanged. The paper-reproduction lock and the existing Windows evaluator smoke environment remain separate contracts.
 
 ```text
-requirements.txt: math-verify[antlr4_9_3]==0.9.0 and psutil>=7.1,<8
-requirements-lock.txt: math-verify==0.9.0 and psutil==7.1.3
-requirements-windows-smoke.txt: math-verify[antlr4_9_3]==0.9.0, datasets==4.4.1, huggingface-hub==0.36.0, psutil==7.1.3
-setup.py MATH_REQUIRES: math-verify[antlr4_9_3]==0.9.0
+datasets==4.4.1
+huggingface-hub==0.36.0
+math-verify[antlr4_9_3]==0.9.0
+numpy==1.26.4
+pandas==2.3.3
+psutil==7.1.3
+pyarrow==22.0.0
+pytest==8.4.2
+tokenizers==0.22.1
+transformers==4.57.1
 ```
 
 Run:
 
 ```powershell
-python -m pip install "math-verify[antlr4_9_3]==0.9.0" "datasets==4.4.1" "huggingface-hub==0.36.0" "psutil==7.1.3"
+python -m pip install -r requirements-data-pipeline-phase1.txt
 python -m pip check
 ```
 
@@ -376,7 +410,7 @@ class CandidatePlan:
         return self.generation_run_id, self.candidate_id
 ```
 
-Validators must reject empty IDs, non-64-hex hashes, negative sample indices, illegal enum values, wrong ReClor answer count, and source-incompatible question fields. `RunManifest.artifacts` is a tuple of `ArtifactRef`; artifact paths must be relative POSIX paths.
+Validators must reject empty IDs, non-64-hex hashes, negative sample indices, illegal enum values, wrong ReClor answer count, and source-incompatible question fields. `QuestionVerificationRecord.gold_parse_status` accepts only `ok` and `gold_verification_error`; candidate records cannot carry question-level gold status. `RunManifest.artifacts` is a tuple of `ArtifactRef`; artifact paths must be relative POSIX paths.
 
 - [ ] **Step 5: Run schema tests and the existing suite**
 
@@ -392,7 +426,7 @@ Expected: focused tests pass and the pre-existing 59-pass baseline does not regr
 - [ ] **Step 6: Commit**
 
 ```bash
-git add permstudy/data_pipeline tests_permstudy/data_pipeline requirements.txt requirements-lock.txt requirements-windows-smoke.txt setup.py
+git add permstudy/data_pipeline tests_permstudy/data_pipeline requirements-data-pipeline-phase1.txt
 git commit -m "feat(data): add pipeline schemas and dependency contract"
 ```
 
@@ -533,7 +567,20 @@ PUBLIC_MANIFEST_KEYS = frozenset({
     "generator_revision", "status_counts", "aggregate_statistics",
     "artifact_sha256", "real_generation_performed", "phase_status",
 })
+
+PUBLIC_EVIDENCE_KEYS = frozenset({
+    "schema_version", "git_sha", "platform", "python_version",
+    "package_versions", "run_ids", "source_revisions", "source_file_hashes",
+    "tree_manifest_hash", "question_counts", "duplicate_counts",
+    "stratification_level", "fallback_reasons", "split_manifest_hash",
+    "semantic_candidate_set_hash", "artifact_hashes", "completion_counts",
+    "verification_status_counts", "question_verification_status_counts",
+    "pair_count", "permutation_count", "real_generation_performed",
+    "phase_status",
+})
 ```
+
+Evidence sanitization validates nested values as scalar/count/hash/version structures and rejects question, response, gold, prompt, solution, context, answer, and absolute-path payload fields at any depth.
 
 Map exceptions to stable types such as `timeout`, `oom`, `dependency_error`, `access_denied`, and `unexpected_error`; never return `str(error)` to the public logger.
 
@@ -577,12 +624,17 @@ git commit -m "feat(data): enforce external storage and safe logging"
 
 ```python
 def test_incomplete_tail_is_quarantined_but_middle_corruption_fails(tmp_path):
-    from permstudy.data_pipeline.io import IntegrityError, scan_jsonl
+    from permstudy.data_pipeline.io import IntegrityError, append_record, scan_jsonl
 
     path = tmp_path / "records.jsonl"
-    path.write_bytes(b'{"id":"a","record_hash":"x"}\n{"id":')
+    append_record(path, {"id": "a"})
+    with path.open("ab") as stream:
+        stream.write(b'{"id":')
     scan = scan_jsonl(path, recover_incomplete_tail=True)
     assert scan.quarantined_tail_path is not None
+    assert scan.quarantined_tail_path.read_bytes() == b'{"id":'
+    assert path.read_bytes().endswith(b"\n")
+    assert scan_jsonl(path).records == scan.records
 
     path.write_bytes(b'{"id":\n{"id":"b"}\n')
     with pytest.raises(IntegrityError, match="middle line"):
@@ -599,7 +651,7 @@ Expected: FAIL during import.
 
 - [ ] **Step 3: Implement durable I/O**
 
-`append_record` computes the record hash over the payload without `record_hash`, writes one compact canonical JSON object plus `\n`, flushes, and calls `os.fsync`. `scan_jsonl` validates each record hash. Tail quarantine renames only the incomplete byte suffix to `filename.tail-corrupt`; it never rewrites valid lines.
+`append_record` computes the record hash over the payload without `record_hash`, writes one compact canonical JSON object plus `\n`, flushes, and calls `os.fsync`. `scan_jsonl` validates each record hash. Recovery finds the byte offset immediately after the last complete LF, writes the exact incomplete suffix to a new private quarantine file, flushes and fsyncs that quarantine file, truncates the original JSONL to the complete-LF offset, then flushes and fsyncs the repaired original before returning or allowing any append. A malformed non-final line remains an integrity failure and is never repaired automatically. Tests assert that the original file is valid JSONL before resume and that quarantine contains the exact removed bytes.
 
 Acquire locks atomically with `os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)`. Recovery requires `recover_stale=True`, matching run/shard metadata, and a dead PID confirmed by psutil.
 
@@ -623,6 +675,9 @@ git commit -m "feat(data): add crash-safe manifests and shard locks"
 - Create: `permstudy/data_pipeline/sources/reclor.py`
 - Create: `tests_permstudy/data_pipeline/test_source_reclor.py`
 - Create: `tests_permstudy/fixtures/data_pipeline/reclor/train.json`
+- Create: `tests_permstudy/fixtures/data_pipeline/reclor/val.json`
+- Create: `tests_permstudy/fixtures/data_pipeline/reclor/test.json`
+- Create: `tests_permstudy/fixtures/data_pipeline/reclor/use_items.txt`
 
 **Interfaces:**
 - Produces: `load_reclor_train(source_path: Path, data_root: Path) -> SourceSnapshot`.
@@ -631,7 +686,7 @@ git commit -m "feat(data): add crash-safe manifests and shard locks"
 
 - [ ] **Step 1: Add an explicitly synthetic fixture and failing tests**
 
-Fixture records include `"synthetic": true`, unique `id_string`, four answers, integer labels, and repeated content cases. Tests assert val/test are ignored, labels map `0..3 -> A..D`, structured hashes preserve answer order, same-content consistent metadata keeps the smallest provenance ID, conflicting labels fail, the private manifest records `license_scope="non_commercial_research"`, and no source text appears in a sanitized manifest.
+Fixture records include `"synthetic": true`, unique `id_string`, four answers, integer labels, and repeated content cases. Tests assert val/test are never converted to `QuestionRecord`, labels map `0..3 -> A..D`, structured hashes preserve answer order, same-content consistent metadata keeps the smallest provenance ID, conflicting labels fail, and no source text appears in a sanitized manifest. The private source snapshot manifest must contain SHA256 for exactly `train.json`, `val.json`, `test.json`, and `use_items.txt`, a canonical relative-file tree manifest sorted by POSIX relative path, its `tree_manifest_hash`, and `license_scope="non_commercial_research"`; changing any one file changes the tree hash.
 
 ```python
 def test_reclor_label_comes_from_official_field():
@@ -643,9 +698,9 @@ def test_reclor_label_comes_from_official_field():
 
 Run: `python -m pytest tests_permstudy/data_pipeline/test_source_reclor.py -v`
 
-- [ ] **Step 3: Implement directory and ZIP acquisition**
+- [ ] **Step 3: Implement directory-only Phase 1 acquisition**
 
-Accept an extracted directory containing `train.json` or a `.zip` archive only after the CLI supplies `--acknowledge-reclor-noncommercial`. For ZIP input, reject absolute paths and `..` members, extract only below an external staging directory, and record the archive SHA256. For directory input, record `train.json` SHA256. Validate required fields and exactly four ordered answers; never read val/test into the snapshot.
+Accept only an extracted external directory after the CLI supplies `--acknowledge-reclor-noncommercial`; archive/password handling is explicitly deferred beyond Phase 1. Require all four official snapshot files, hash each one, and build the canonical tree manifest before reading training rows. Validate `train.json` required fields and exactly four ordered answers. `val.json` and `test.json` participate only in snapshot integrity and never produce training records; `use_items.txt` is likewise hashed but not parsed into questions.
 
 - [ ] **Step 4: Verify outputs remain external and deterministic**
 
@@ -656,7 +711,7 @@ Run the focused test twice and assert identical question records and manifest pa
 ```bash
 python -m pytest tests_permstudy/data_pipeline/test_source_reclor.py -v
 python -m pytest tests_permstudy -q
-git add permstudy/data_pipeline/sources tests_permstudy/data_pipeline/test_source_reclor.py tests_permstudy/fixtures/data_pipeline/reclor/train.json
+git add permstudy/data_pipeline/sources tests_permstudy/data_pipeline/test_source_reclor.py tests_permstudy/fixtures/data_pipeline/reclor
 git commit -m "feat(data): acquire and validate ReClor train data"
 ```
 
@@ -814,11 +869,12 @@ git commit -m "feat(data): plan candidates and define generation backends"
 **Interfaces:**
 - Produces: `run_generation_shard(plan, backend, output_dir, recover_stale_lock=False) -> ShardRunSummary`.
 - Produces: `successful_candidate_keys(shard_dir) -> frozenset[tuple[str, str]]`.
+- Produces: `semantic_candidate_set_hash(records: Iterable[CandidateRecord]) -> str`.
 - Consumes: Task 4 durable I/O and locks.
 
 - [ ] **Step 1: Write failing interruption/resume tests**
 
-Simulate a backend that succeeds twice, fails once, then raises process interruption. Assert successful lines remain, failure history is separate, resume calls only missing composite keys, retry success raises final completion to 100%, old failures remain auditable, and a second run with a changed config/run ID never treats old logical IDs as complete.
+Simulate a backend that succeeds twice, fails once, then raises process interruption. Assert successful lines remain, failure history is separate, resume calls only missing composite keys, retry success raises final completion to 100%, old failures remain auditable, and a second run with a changed config/run ID never treats old logical IDs as complete. Compare with an uninterrupted run: the final successful composite-key sets and `semantic_candidate_set_hash` values must match, while physical execution-history manifest hashes are allowed to differ.
 
 - [ ] **Step 2: Run focused tests and observe failures**
 
@@ -830,9 +886,11 @@ Order operations exactly: validate isolation/config/upstream hashes; acquire loc
 
 Map OOM to `error_type="oom"`. Compare the complete generation config hash before resume; any changed batch size, tensor parallel size, max model length, memory utilization, prompt hash, sampling config, model revision, or split hash raises `RunMismatchError`.
 
-- [ ] **Step 4: Verify interrupted and uninterrupted hashes match**
+`semantic_candidate_set_hash` sorts successful records by `(generation_run_id, candidate_id)` and hashes canonical semantic payloads containing the composite key, response normalization/hash, finish reason, generated token count, and immutable model revision. It excludes append order, timestamps, retry counts, failure history, record hashes, and physical artifact paths.
 
-Run the focused test that executes both routes and asserts equal successful composite-key sets and canonical output-manifest hashes.
+- [ ] **Step 4: Verify interrupted and uninterrupted semantic results match**
+
+Run the focused test that executes both routes and asserts equal successful composite-key sets and equal canonical semantic candidate-set hashes. Assert separately that differing failure history is permitted to produce different physical output-manifest hashes and is not a correctness failure.
 
 - [ ] **Step 5: Run full suite and commit**
 
@@ -854,7 +912,7 @@ git commit -m "feat(data): add append-only generation resume"
 
 **Interfaces:**
 - Produces: `parse_reclor_candidate(response: str) -> ParsedAnswer`.
-- Produces: `verify_reclor(question, candidate) -> VerificationRecord`.
+- Produces: `verify_reclor_question(question, candidates) -> tuple[QuestionVerificationRecord, list[VerificationRecord]]`.
 
 - [ ] **Step 1: Write the terminal-marker truth table as failing tests**
 
@@ -883,7 +941,7 @@ Run: `python -m pytest tests_permstudy/data_pipeline/test_verification_reclor.py
 
 - [ ] **Step 3: Implement strict parsing and exact-match records**
 
-Only whitespace may follow the unique marker. Count all case-sensitive `Final Answer:` markers; identical duplicates are invalid and conflicting valid answers are ambiguous. Store `verifier_name="reclor_exact_match"`, parser version, parse statuses, and no math-verify fields.
+Only whitespace may follow the unique marker. Count all case-sensitive `Final Answer:` markers; identical duplicates are invalid and conflicting valid answers are ambiguous. The question-level function emits exactly one `QuestionVerificationRecord(gold_parse_status="ok")` for the official canonical label plus one candidate record per input candidate. Store `verifier_name="reclor_exact_match"`, parser version, prediction parse status, and no math-verify fields in candidate records.
 
 - [ ] **Step 4: Run focused/full tests and commit**
 
@@ -905,17 +963,17 @@ git commit -m "feat(data): add strict ReClor verification"
 **Interfaces:**
 - Produces: `extract_math_gold(solution: str) -> BoxedAnswer`.
 - Produces: `extract_math_candidate(response: str) -> BoxedAnswer`.
-- Produces: `verify_math_question(question, candidates, timeout_seconds) -> list[VerificationRecord]`.
+- Produces: `verify_math_question(question, candidates, gold_timeout_seconds, candidate_timeout_seconds) -> tuple[QuestionVerificationRecord, list[VerificationRecord]]`.
 
 API references are the official [Math-Verify README](https://github.com/huggingface/Math-Verify/blob/main/README.md), the published [0.9.0 package](https://pypi.org/project/math-verify/0.9.0/), and the documented [Windows timeout/pickling failure](https://github.com/huggingface/Math-Verify/issues/79). The parent-enforced spawn-process timeout is intentional and must not be replaced with the library's signal-based timeout on Windows.
 
 - [ ] **Step 1: Write failing extraction/status/cache tests**
 
-Test a terminal nested `\boxed{\frac{1}{2}}`, missing marker, malformed braces, duplicate same candidate markers -> invalid, conflicting markers -> ambiguous, gold parse failure -> question-level `gold_verification_error`, explicit equivalent/non-equivalent cases, child exception -> error, and one gold parse for six normal candidates.
+Test a terminal nested `\boxed{\frac{1}{2}}`, missing marker, malformed braces, duplicate same candidate markers -> invalid, conflicting markers -> ambiguous, gold parse failure -> exactly one `QuestionVerificationRecord(gold_parse_status="gold_verification_error")` and zero candidate records, explicit equivalent/non-equivalent cases, child exception -> error, and one gold parse for six normal candidates. Assert no gold failure is duplicated into candidate `error` records.
 
 - [ ] **Step 2: Write a Windows timeout regression test**
 
-Inject a top-level worker function that blocks. Assert one candidate becomes `error` with `error_type="timeout"`, the child is terminated, and the next candidate is processed in a fresh worker. The test must pass under Windows `spawn` and Linux/WSL.
+Inject separate top-level worker hooks that block during gold parsing and candidate verification. A gold timeout must terminate/join the worker, emit one question-level gold error, and stop without sending any candidate. A candidate timeout after `GOLD_READY` must emit one candidate `error` with `error_type="timeout"`, terminate/join the worker, start a fresh worker, complete the gold handshake again, and then process the next candidate. The test must pass under Windows `spawn` and Linux/WSL.
 
 - [ ] **Step 3: Run focused tests and observe failures**
 
@@ -923,7 +981,7 @@ Run: `python -m pytest tests_permstudy/data_pipeline/test_verification_math.py -
 
 - [ ] **Step 4: Implement strict extraction and a per-question worker process**
 
-The parent starts a spawn-context worker for one question. The worker imports `parse`/`verify`, parses gold once with:
+The parent starts a spawn-context worker for one question. The worker imports `parse`/`verify`, and the protocol has two explicit phases. In Phase A, the worker parses gold once with:
 
 ```python
 gold = parse(
@@ -935,7 +993,9 @@ gold = parse(
 )
 ```
 
-For each candidate it parses the strict extracted boxed region and calls:
+After parsing, the worker sends exactly one handshake message: `GOLD_READY` with a private canonical representation, or `GOLD_ERROR` with a sanitized error type. The parent waits no longer than `gold_timeout_seconds`; timeout terminates and joins the worker and has the same question-level result as `GOLD_ERROR`. Either failure emits one `QuestionVerificationRecord(gold_parse_status="gold_verification_error")`, emits no candidate records for that question, and sends no candidate messages.
+
+Only after `GOLD_READY`, Phase B sends candidates one at a time. For each candidate the worker parses the strict extracted boxed region and calls:
 
 ```python
 equivalent = verify(
@@ -947,7 +1007,7 @@ equivalent = verify(
 )
 ```
 
-The parent enforces `timeout_seconds` with a Pipe poll. The child returns only strings, booleans, status codes, and sanitized error types—never SymPy objects—avoiding cross-process pickling. On timeout, terminate/join the worker, mark only that candidate as error, restart for remaining candidates, and record the worker restart. Empty parse results are ambiguous, not incorrect; only explicit `equivalent is False` after successful parses is incorrect.
+The parent enforces `candidate_timeout_seconds` separately for every Phase B request with a Pipe poll. The child returns only strings, booleans, status codes, and sanitized error types—never SymPy objects—avoiding cross-process pickling. On candidate timeout, terminate/join the worker, mark only that candidate as error, restart for remaining candidates, repeat Phase A, and record the worker restart. A normal six-candidate question therefore parses gold once; a worker restart may reparse it. Empty parse results are ambiguous, not incorrect; only explicit `equivalent is False` after successful parses is incorrect. Both `parse(..., parsing_timeout=None)` and `verify(..., timeout_seconds=None)` keep the library's internal timeout disabled; the parent process owns both timeouts.
 
 - [ ] **Step 5: Add runtime version enforcement**
 
@@ -1052,12 +1112,12 @@ git commit -m "feat(data): build lineage-safe AB BA permutations"
 - Create: `tests_permstudy/data_pipeline/test_audit.py`
 
 **Interfaces:**
-- Produces: `build_audit_selection(records, audit_seed=42, max_per_cell=5) -> list[AuditSelectionRecord]`.
+- Produces: `build_audit_selection(candidate_records, question_records, generation_run_id, audit_seed=42, max_per_cell=5) -> list[AuditSelectionRecord]`.
 - Produces: `validate_audit_decisions(selection, decisions) -> AuditSummary`.
 
 - [ ] **Step 1: Write failing coverage and deterministic-sampling tests**
 
-Assert all invalid/ambiguous/error/gold-error records are selected; correct/incorrect are grouped by source × generator × status; at most five per cell selected by SHA256 seed score; small cells are exhaustive; input order does not matter; decisions allow only AGREE/DISAGREE/UNSURE; missing/duplicate/foreign decision IDs fail; reason codes use the approved enum.
+Assert all candidate `invalid`/`ambiguous`/`error` records and every question-level `gold_verification_error` are selected; question gold errors use `record_kind="question_gold"` with no candidate/generator/status and appear exactly once per question. Candidate `correct`/`incorrect` records are grouped by source × generator × status; at most five per cell are selected by SHA256 seed score; small cells are exhaustive; input order does not matter; decisions allow only AGREE/DISAGREE/UNSURE; missing/duplicate/foreign decision identities fail; reason codes use the approved enum.
 
 - [ ] **Step 2: Run focused tests and observe failures**
 
@@ -1065,7 +1125,7 @@ Run: `python -m pytest tests_permstudy/data_pipeline/test_audit.py -v`
 
 - [ ] **Step 3: Implement selection and confirmed disagreement handling**
 
-Selection records bind generation and verification run IDs. Decision validation distinguishes first-review disagreement from `confirmed_disagree=True`; only confirmed disagreement contributes a hard-fail signal. `UNSURE` remains a separate count and queue. The only reason codes are `missing_final_marker`, `duplicate_same_marker`, `conflicting_markers`, `math_parse_failure`, `gold_parse_failure`, `timeout`, `dependency_error`, `prompt_contract_mismatch`, and `other`.
+Selection records bind generation and verification run IDs. Candidate audit identity is `(record_kind, generation_run_id, verification_run_id, candidate_id)`; question-gold identity substitutes `original_question_id` for the absent candidate ID. Decision validation distinguishes first-review disagreement from `confirmed_disagree=True`; only confirmed disagreement contributes a hard-fail signal. `UNSURE` remains a separate count and queue. The only reason codes are `missing_final_marker`, `duplicate_same_marker`, `conflicting_markers`, `math_parse_failure`, `gold_parse_failure`, `timeout`, `dependency_error`, `prompt_contract_mismatch`, and `other`.
 
 - [ ] **Step 4: Run focused/full tests and commit**
 
@@ -1091,7 +1151,7 @@ git commit -m "feat(data): add deterministic verifier audit protocol"
 
 - [ ] **Step 1: Write table-driven threshold tests**
 
-Cover completion 99%/100%; pair yield 19%/20%/29%/30%; invalid+error 20%/just above 20%; pooled dominance 89%/90%; per-source dominance 70%/above 70%/90%; correct rate 0%/100% with denominator `correct+incorrect`; undefined zero denominator; confirmed disagreement; systematic prompt/parser issue; and ambiguous rate remaining diagnostic-only.
+Cover completion 99%/100%; pair yield 19%/20%/29%/30%; candidate invalid+error 20%/just above 20%; pooled dominance 89%/90%; per-source dominance 70%/above 70%/90%; correct rate 0%/100% with denominator `correct+incorrect`; undefined zero denominator; confirmed disagreement; systematic prompt/parser issue; and ambiguous rate remaining diagnostic-only. Add a question-level gold error and assert it is reported/audited but does not enter any generator/source `invalid_error_rate` numerator or denominator.
 
 ```python
 def test_ambiguous_rate_never_changes_v1_gate_status():
@@ -1107,7 +1167,7 @@ Run: `python -m pytest tests_permstudy/data_pipeline/test_gates.py -v`
 
 - [ ] **Step 3: Implement exact denominators and precedence**
 
-Compute completion from planned versus successful composite keys; pair yield from selected-pair questions/planned source questions; invalid+error from successful generated candidates in each cell; dominance from selected representatives/selected pairs; correct rate from correct/(correct+incorrect). Apply status precedence `FAIL`, then `PASS_WITH_WARNINGS`, then `PASS`.
+Compute completion from planned versus successful composite keys; pair yield from selected-pair questions/planned source questions; invalid+error from candidate verification records over successful generated candidates in each cell; dominance from selected representatives/selected pairs; correct rate from correct/(correct+incorrect). Functional completeness requires exactly one question verification record per verified question; questions with `ok` require their candidate records, while `gold_verification_error` requires zero candidate verification records. `QuestionVerificationRecord` values are a separate audit/completeness input and never multiply or otherwise enter candidate-level generator rates. Apply status precedence `FAIL`, then `PASS_WITH_WARNINGS`, then `PASS`.
 
 Hard failures are completion below 100%, any source pair yield below 20%, any generator/source invalid+error rate above 20%, pooled positive or negative generator share at least 90%, confirmed binary-label disagreement, or systematic prompt/parser/verifier issue. Warnings are source pair yield below 30%, pooled or per-source generator share above 70%, binary correct rate exactly 0% or 100%, and per-source share at least 90% as a strong warning. Ambiguous rate never changes status in v1.
 
@@ -1146,10 +1206,12 @@ The fixed CLI argument contract is:
 
 | Script | Required inputs | Stage output |
 |---|---|---|
-| `prepare_questions.py` | `--data-root`, `--source`, ReClor dir/archive or `--math-revision`, `--split-seed 42`; ReClor also requires `--acknowledge-reclor-noncommercial` | source and split manifests |
+| `prepare_questions.py acquire-reclor` | `--data-root`, `--reclor-dir`, `--acknowledge-reclor-noncommercial` | immutable ReClor source manifest |
+| `prepare_questions.py acquire-math` | `--data-root`, `--math-revision` | immutable MATH source manifest |
+| `prepare_questions.py build-split` | `--data-root`, `--reclor-manifest`, `--math-manifest`, `--split-seed 42` | one unified two-source split manifest and smoke manifest |
 | `plan_generation.py` | `--data-root`, `--split-manifest`, three `--generator-config` JSON files, `--samples-per-question 2`, `--shard-size` | generation plan manifest |
 | `generate_candidates.py` | `--data-root`, `--generation-manifest`, `--generator-id`, `--shard-id`, `--backend fake`; optional `--recover-stale-lock` | candidate/failure shard |
-| `verify_candidates.py` | `--data-root`, `--generation-manifest`, `--verifier-timeout-seconds` | verification run |
+| `verify_candidates.py` | `--data-root`, `--generation-manifest`, `--gold-timeout-seconds`, `--candidate-timeout-seconds` | verification run with separate question/candidate records |
 | `build_reasoning_pairs.py` | `--data-root`, `--verification-manifest`, `--tokenizer-revision` | pair run |
 | `build_permutations.py` | `--data-root`, `--pair-manifest` | permutation run |
 | `audit_generator_distribution.py` | `--data-root`, `--verification-manifest`, optional `--decisions`, `--audit-seed 42` | audit selection/summary |
@@ -1158,7 +1220,7 @@ The fixed CLI argument contract is:
 
 - [ ] **Step 1: Write failing parser/default/boundary tests**
 
-Assert every CLI imports without vLLM; `prepare_questions` requires explicit data root and source input; split seed defaults to 42; generation defaults to fake; `--backend vllm` exits with `PhaseBoundaryError` in Phase 1 before importing vLLM; stale-lock recovery requires the explicit flag; no CLI prints absolute paths or payload text; exit codes are 0 success, 2 contract/config error, 3 integrity error, 4 dependency/access error.
+Assert every CLI imports without vLLM. `prepare_questions` requires one of the three subcommands: the two acquisition calls each create one immutable source manifest, and `build-split` refuses to run unless both referenced source manifests and artifact hashes validate. Split seed defaults to 42; ReClor has no archive argument in Phase 1; generation defaults to fake; `--backend vllm` exits with `PhaseBoundaryError` in Phase 1 before importing vLLM; stale-lock recovery requires the explicit flag; no CLI prints absolute paths or payload text; exit codes are 0 success, 2 contract/config error, 3 integrity error, 4 dependency/access error.
 
 - [ ] **Step 2: Run focused tests and observe missing-script failures**
 
@@ -1194,13 +1256,13 @@ git commit -m "feat(data): add controlled pipeline command line interfaces"
 **Interfaces:**
 - Produces: `run_fake_e2e(data_root, fixture_root) -> FakeE2ESummary`.
 
-- [ ] **Step 1: Create the 40-question explicitly synthetic fixture**
+- [ ] **Step 1: Create the 80-question explicitly synthetic source fixture**
 
-Provide 20 synthetic MATH and 20 synthetic ReClor questions, each marked `synthetic=true`. Provide six fake responses per question covering correct/incorrect, duplicate, invalid, ambiguous, error, and historical-failure-then-success behavior while guaranteeing at least one selected pair per source.
+Provide 40 synthetic MATH and 40 synthetic ReClor source questions, each marked `synthetic=true`. ReClor has exactly ten A, ten B, ten C, and ten D official labels so the 90/10 label-stratified split is exercised. The deterministic split leaves 36 train questions per source; smoke selection then takes exactly 20 MATH and 20 ReClor train questions. Provide fake response templates for the selected questions so `40 smoke questions × 3 generators × 2 samples = 240 candidates`, covering correct/incorrect, duplicate, invalid, ambiguous, error, and historical-failure-then-success behavior while guaranteeing at least one selected pair per source.
 
 - [ ] **Step 2: Write a failing full-flow test**
 
-The test runs source loading -> split/smoke -> 240 candidate planning -> interrupted fake generation -> resume -> verification -> audit selection with synthetic AGREE decisions -> pairs -> permutations -> gates. Assert 240 final successful composite keys, one pair maximum per question, two permutations per pair, stable manifest hashes across a clean rerun, and no production-only phase status.
+The test runs 80-row source loading -> 90/10 split -> deterministic 20+20 train smoke selection -> 240 candidate planning -> interrupted fake generation -> resume -> verification -> audit selection with synthetic AGREE decisions -> pairs -> permutations -> gates. Assert 72 train and 8 held-out source questions overall, 40 selected smoke questions, 240 final successful composite keys, one pair maximum per question, two permutations per pair, equal semantic candidate-set hashes across interrupted and clean runs, stable downstream canonical pair/permutation hashes, and no production-only phase status. Physical generation-history manifest hashes may differ when retry history differs.
 
 - [ ] **Step 3: Run the test and observe missing orchestration behavior**
 
@@ -1210,9 +1272,9 @@ Run: `python -m pytest tests_permstudy/data_pipeline/test_fake_e2e.py -v`
 
 `run_fake_e2e.py` must not duplicate stage logic. It creates an external temporary root when `--data-root` is supplied by tests, writes private artifacts there, and prints only the sanitized summary.
 
-- [ ] **Step 5: Verify Windows and WSL hashes**
+- [ ] **Step 5: Verify Windows and WSL semantic hashes**
 
-Run the E2E in both environments and compare the emitted canonical manifest hashes byte-for-byte.
+Run the E2E in both environments and compare successful composite candidate keys, semantic candidate-set hashes, split hashes, and canonical pair/permutation hashes byte-for-byte. Do not require equality of physical execution-history manifests that contain different append/failure histories.
 
 - [ ] **Step 6: Run full suite and commit**
 
@@ -1234,6 +1296,8 @@ git commit -m "test(data): add synthetic fake pipeline end to end"
 - Create: `artifacts/data_pipeline/phase1/fake_e2e_summary.json`
 - Create: `artifacts/data_pipeline/phase1/private_source_summary.json`
 - Create: `artifacts/data_pipeline/phase1/git_data_scan.txt`
+- Modify: `scripts_permstudy/data/validate_dataset.py`
+- Modify: `tests_permstudy/data_pipeline/test_cli.py`
 - Modify: `docs/superpowers/specs/2026-10-06-controlled-training-data-pipeline-design.md`
 
 **Interfaces:**
@@ -1246,7 +1310,7 @@ Require runtime-only environment variables to have been set outside Git, then de
 
 ```powershell
 if (-not $env:PAGRPO_DATA_ROOT) { throw 'PAGRPO_DATA_ROOT is required' }
-if (-not $env:PAGRPO_RECLOR_DIR -and -not $env:PAGRPO_RECLOR_ARCHIVE) { throw 'A ReClor source is required' }
+if (-not $env:PAGRPO_RECLOR_DIR) { throw 'PAGRPO_RECLOR_DIR is required in Phase 1' }
 $env:HF_HOME = Join-Path $env:PAGRPO_DATA_ROOT 'hf_home'
 $env:HUGGINGFACE_HUB_CACHE = Join-Path $env:HF_HOME 'hub'
 $env:TRANSFORMERS_CACHE = Join-Path $env:HF_HOME 'transformers'
@@ -1256,11 +1320,11 @@ Do not echo or persist the resolved values. Confirm isolation with `validate_dat
 
 - [ ] **Step 2: Acquire real ReClor/MATH privately and build the split**
 
-Run `prepare_questions.py` with official ReClor train and `EleutherAI/hendrycks_math`. Resolve the MATH revision before loading. Confirm private manifests contain file/revision hashes, source counts, dedup counts, fallback level, `split_seed=42`, and split hash; confirm public output contains counts/hashes only.
+Run `prepare_questions.py acquire-reclor` against the extracted official directory and confirm the private tree manifest hashes `train.json`, `val.json`, `test.json`, and `use_items.txt`, while only train rows become questions. Run `prepare_questions.py acquire-math` after resolving the immutable `EleutherAI/hendrycks_math` revision. Then run `prepare_questions.py build-split` with both immutable source manifests and `split_seed=42`. Confirm private manifests contain file/revision hashes, source counts, dedup counts, fallback level, and split hash; confirm public output contains counts/hashes only.
 
 - [ ] **Step 3: Run the private 40-question fake pipeline**
 
-Use the real private smoke question manifest with the fake backend; do not run vLLM. Complete verification, synthetic audit decisions clearly labeled as Phase 1 plumbing-only, pair/permutation build, and gate calculation. Do not interpret fake-response Statistical Gate results as a real smoke result.
+Use the real private smoke question manifest with the fake backend; do not run vLLM. Complete an interrupted/resumed route and a clean route, requiring equal final successful composite keys and semantic candidate-set hashes but not equal physical failure-history manifests. Complete verification, synthetic audit decisions clearly labeled as Phase 1 plumbing-only, pair/permutation build, and gate calculation. Do not interpret fake-response Statistical Gate results as a real smoke result.
 
 - [ ] **Step 4: Run the complete Windows and WSL test matrix**
 
@@ -1274,11 +1338,19 @@ Run the same suite in WSL Python 3.12 and append the labeled output. Record plat
 
 - [ ] **Step 5: Scan every Git-tracked file for prohibited data**
 
-Build a scanner that checks tracked text files for the known private root, ReClor/MATH source snippets selected only in memory, token patterns, `private-manifest`, and non-synthetic fixture gold/response fields. Save only rule names, scanned file count, match count, and PASS/FAIL to `git_data_scan.txt`; never save the searched private snippets.
+Build a path/schema-aware scanner over `git ls-files -z`; do not search for generic words such as `gold`, `response`, or `private-manifest`. It applies these deterministic rules:
+
+1. reject tracked paths below `data_permstudy/`, `private_data/`, or `private_logs/`, and reject files ending `.private-manifest.json`;
+2. scan all tracked text for the exact resolved private-root bytes and HF/secret token patterns; apply generic Windows/POSIX user-home absolute-path detection only to the new `permstudy/data_pipeline/`, `scripts_permstudy/data/`, `tests_permstudy/fixtures/data_pipeline/`, and `artifacts/data_pipeline/phase1/` surfaces so pre-existing upstream examples/evidence are not reclassified by this feature;
+3. allow full-text question/response/gold fields only below `tests_permstudy/fixtures/data_pipeline/`, and parse every JSON/JSONL record there to require `synthetic=true`;
+4. parse JSON/JSONL below `artifacts/data_pipeline/phase1/` and require keys to be within the public manifest/evidence allowlists, rejecting payload-text fields and absolute paths;
+5. inspect newly added pipeline artifacts by schema rather than flagging terminology in design docs, source code, or schemas.
+
+Tests seed one violation for each rule plus design/schema files containing the words `gold` and `response`, proving violations fail and documentation does not self-trigger. Save only rule names, scanned file count, match count, and PASS/FAIL to `git_data_scan.txt`; never save private snippets or paths.
 
 - [ ] **Step 6: Write sanitized evidence**
 
-`private_source_summary.json` includes source revisions/file hashes, question counts, duplicate counts, selected stratification level, split hash, and fake-run counts. `fake_e2e_summary.json` includes run IDs, artifact hashes, completion counts, verification status counts, pair/permutation counts, and explicit `real_generation_performed=false`.
+`private_source_summary.json` includes source revisions/file hashes, the ReClor tree-manifest hash, question counts, duplicate counts, selected stratification level, split hash, and fake-run counts. `fake_e2e_summary.json` includes run IDs, semantic candidate-set hash, sanitized artifact hashes, completion counts, candidate and question-level verification status counts, pair/permutation counts, and explicit `real_generation_performed=false`.
 
 `README.md` states:
 
@@ -1288,6 +1360,13 @@ Implementation: AWAITING_PHASE1_CODE_REVIEW
 Real vLLM generation: NOT RUN
 Real smoke gates: NOT EVALUATED
 200-pair pilot: NOT AUTHORIZED
+```
+
+Commit the implemented scanner, its violation/non-self-trigger tests, and the pre-review evidence while the status remains `AWAITING_PHASE1_CODE_REVIEW`:
+
+```bash
+git add scripts_permstudy/data/validate_dataset.py tests_permstudy/data_pipeline/test_cli.py artifacts/data_pipeline/phase1
+git commit -m "test(data): record Phase 1 pre-review acceptance evidence"
 ```
 
 - [ ] **Step 7: Request independent code review**
