@@ -1,6 +1,6 @@
 # Controlled Training Data Pipeline Design
 
-**Status:** Design approved subject to final minor-diff confirmation; implementation not started
+**Status:** `DESIGN_SPEC_APPROVED`; implementation not started
 
 **Branch:** `codex/data-pipeline-plan`
 
