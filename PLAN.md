@@ -11,6 +11,10 @@
 > 推荐基础代码：PA-GRPO 官方仓库（基于 verl），在其上最小侵入地加入 EIS 与自定义方法
 >
 > Pairwise 主线与 MCQ 扩展边界见 [`PLAN_ADDENDUM_PAIRWISE_SCOPE_AND_MCQ_EXTENSION.md`](PLAN_ADDENDUM_PAIRWISE_SCOPE_AND_MCQ_EXTENSION.md)。其中“一题一个固定 Judge pair”及 MCQ 仅作为可选扩展的约束适用于 controlled main experiments。
+>
+> Controlled training data 的来源、multi-generator recipe、verification、pair selection、Phase 1/2 边界及 gate contract 以 [`docs/superpowers/specs/2026-10-06-controlled-training-data-pipeline-design.md`](docs/superpowers/specs/2026-10-06-controlled-training-data-pipeline-design.md) 为准；该设计取代本计划早期的 single-generator / K=8 配方。
+>
+> Permutation-sensitive filtering 的正式公平比较协议以 [`PLAN_ADDENDUM_SENSITIVE_FILTERING_FAIR_COMPARISON.md`](PLAN_ADDENDUM_SENSITIVE_FILTERING_FAIR_COMPARISON.md) 为准；它取代本计划中用于 filtering-effect 结论的旧 `D_all vs D_sensitive` 表述。
 
 ---
 
@@ -626,22 +630,25 @@ semantic winner 始终是 `pos`。
 
 ## 7.3 Candidate 生成
 
-第一版建议：
+本节原有的 single-generator / K=8 配方已被 controlled training data pipeline 设计取代。正式 contract 见 [`controlled-training-data-pipeline-design.md`](docs/superpowers/specs/2026-10-06-controlled-training-data-pipeline-design.md)，当前摘要如下：
 
-- generator：Qwen2.5-7B-Instruct
-- temperature：1.0
-- 每题 K=8
-- max completion：先 512，pilot 后根据真实长度调整
+- source：MATH train + ReClor train；
+- real smoke：每个 source 20 题，共 40 题；
+- generator：`Qwen/Qwen2.5-7B-Instruct`、`Qwen/Qwen2.5-32B-Instruct`、`meta-llama/Llama-3.1-8B-Instruct`；
+- 每个 generator 每题 2 个 sample，因此每题总 K=6，real smoke 共 240 个 planned candidates；
+- exact prompt、sampling、tokenizer 与 model revisions 全部由 immutable run manifest 固定；
+- generation configuration 变化必须创建新的 `generation_run_id`，不得续写旧 run。
 
-对每题：
+每题的正式处理流程为：
 
-1. 生成 K 个 reasoning response；
-2. 自动提取最终答案；
-3. 分成 correct / incorrect；
-4. 若没有同时存在 correct 和 incorrect，则该题暂时丢弃；
-5. 从正负集合中构造 pair。
+1. 三个 generator 逐模型、分 shard 生成并 append-only 保存；
+2. 使用 source-specific strict verifier 将 candidate 区分为 `correct / incorrect / invalid / ambiguous / error`；
+3. 只有 `correct / incorrect` 进入 pair pool；
+4. 对 canonical duplicate response 去重但保留完整 provenance；
+5. 枚举 correct × incorrect，并使用固定 Qwen2.5-7B tokenizer 的 token 数选择最小长度差 pair；
+6. 每题最多选择一个确定性 pair，再构造 AB / BA。
 
-为了减少明显 length cue，本项目可优先配对长度差较小的正负 response。注意：这是本项目的数据设计选择，不要写成 J4R 训练集的已知规则。
+当前分支 Phase 1 只实现和验证数据系统及 fake backend；独立 review 通过前不得启动真实 vLLM generation 或 240-candidate real smoke。Phase 2 real smoke 通过 Functional Gate 和 Statistical Gate 后，才允许进入 200-pair Pilot。
 
 ---
 
@@ -684,6 +691,8 @@ JudgeBench 与 ReasoningJudgeBench 永远 eval-only，不得进入任何：
 ---
 
 # 8. Hard / sensitive 数据子集
+
+> 本节保留研究动机。`D_eligible / D_sensitive / D_consistent` 的构造、等规模 random-from-eligible baseline、seed 含义和允许的结论，统一以 [`PLAN_ADDENDUM_SENSITIVE_FILTERING_FAIR_COMPARISON.md`](PLAN_ADDENDUM_SENSITIVE_FILTERING_FAIR_COMPARISON.md) 为准；该补充文件取代下方旧的 `D_all vs D_sensitive` filtering-effect 表述。
 
 为了研究 PA 数据筛选这个 confound，需要构造两套训练视图：
 
@@ -1241,6 +1250,8 @@ right y-axis: local rescue rate
 ---
 
 ## 16.2 Data-filtering analysis
+
+> 本节的正式实验比较已由 [`PLAN_ADDENDUM_SENSITIVE_FILTERING_FAIR_COMPARISON.md`](PLAN_ADDENDUM_SENSITIVE_FILTERING_FAIR_COMPARISON.md) 修订。Filtering effect 比较 `D_sensitive^M` 与从 `D_eligible` 无放回抽样的等规模 `D_random^M`；`D_all^N` 与 `D_sensitive^M` 仅用于 sample-efficiency 分析。
 
 比较：
 

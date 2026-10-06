@@ -1,6 +1,6 @@
 # Controlled Training Data Pipeline Design
 
-**Status:** Approved design draft for independent review
+**Status:** Design revision submitted for second review; implementation not approved
 
 **Branch:** `codex/data-pipeline-plan`
 
@@ -143,14 +143,24 @@ Normalization is versioned as `question_normalization_v1`.
 
 ### 5.2 Identity
 
-For ReClor:
+For ReClor, construct this exact structured payload:
+
+```json
+{
+  "answers": ["A...", "B...", "C...", "D..."],
+  "context": "...",
+  "question": "...",
+  "schema": "reclor_question_content_v1"
+}
+```
+
+Each text value is normalized with `question_normalization_v1`; answer array order is preserved. The object is serialized as canonical JSON with UTF-8 encoding, lexicographically sorted keys, `,` and `:` separators without optional whitespace, `ensure_ascii=false`, and no trailing newline. `question_content_hash` is SHA256 over those exact bytes. Including the structured field names and array boundaries prevents ambiguous concatenation. The identity remains:
 
 ```text
 original_question_id = reclor:train:{official id_string}
-question_content_hash = SHA256(canonical(context + question + ordered answers))
 ```
 
-The official ID is stable provenance, while the full content hash proves that the content associated with that ID has not changed.
+The official ID is stable provenance, while the structured full content hash proves that the content associated with that ID has not changed.
 
 For MATH:
 
@@ -240,6 +250,14 @@ sampling_index
 
 It is independent of backend return order. Decoding parameters are deliberately not part of `candidate_id`; they are pinned by the generation run manifest. Any generation configuration change creates a new `generation_run_id` and cannot be resumed into an old run.
 
+`candidate_id` is a reusable logical ID, not a globally unique record key. The unique key for every candidate record is:
+
+```text
+(generation_run_id, candidate_id)
+```
+
+Resume, shard merge, verification lookup, deduplication provenance, and artifact references must always use the composite key. No stage may use a bare `candidate_id` to match records across generation runs.
+
 ### 6.2 Shards and resume
 
 Each generator shard has:
@@ -250,11 +268,7 @@ failures.jsonl
 manifest.json
 ```
 
-Successful candidate records are append-only. Failures are appended separately. Resume computes:
-
-```text
-planned candidate IDs - successful candidate IDs
-```
+Successful candidate records are append-only. Failures are appended separately. Resume computes the planned composite `(generation_run_id, candidate_id)` keys minus the successful composite keys for that same run.
 
 Historical failures do not lower final generation completion after a later retry succeeds.
 
@@ -331,7 +345,7 @@ Response normalization v1 applies:
 3. leading and trailing whitespace stripped;
 4. internal text and line structure preserved.
 
-The normalized response hash is SHA256 over canonical UTF-8 bytes. Raw candidate records are retained. Duplicate normalized responses form a deduplication group whose representative is the lexicographically smallest `candidate_id`.
+The normalized response hash is SHA256 over canonical UTF-8 bytes. Raw candidate records are retained. Duplicate normalized responses form a run-scoped deduplication group whose representative is the lexicographically smallest `candidate_id`. The group preserves the normalized response hash, representative composite candidate key, all member composite candidate keys, and member generators. If members with one normalized response hash have conflicting verification statuses, pair construction fails with a verifier/integrity error rather than silently selecting a representative.
 
 Responses with `finish_reason=length`, empty content, or no verifiable terminal answer are excluded from the pair pool even if an incidental answer can be extracted.
 
@@ -422,6 +436,52 @@ PASS_WITH_WARNINGS
 FAIL
 ```
 
+All Gate metrics use the following fixed denominators.
+
+For each source:
+
+```text
+pair_yield(source)
+= number of planned source questions that produce one final selected pair
+  / number of planned smoke questions for that source
+```
+
+The real smoke denominator is 20 for MATH and 20 for ReClor. Each question contributes at most one selected pair to the numerator.
+
+For each generator/source cell:
+
+```text
+invalid_error_rate(generator, source)
+= (# verification_status=invalid + # verification_status=error)
+  / # successfully generated candidates in that generator/source cell
+```
+
+At 100% real-smoke generation completion, the cell denominator is `20 questions x 2 samples = 40`. Historical failed attempts and missing candidates are not included in this denominator; unresolved missing candidates independently fail the 100% completion requirement.
+
+Generator dominance uses only representatives in final selected pairs:
+
+```text
+positive_share(generator, scope)
+= # selected pairs whose positive representative comes from generator in scope
+  / # selected pairs in scope
+
+negative_share(generator, scope)
+= # selected pairs whose negative representative comes from generator in scope
+  / # selected pairs in scope
+```
+
+`scope=pooled` uses all selected MATH and ReClor pairs; `scope=source` uses only selected pairs from that source. A zero selected-pair denominator leaves dominance undefined, while the corresponding pair-yield rule already produces a hard failure.
+
+Correct rate excludes non-binary verifier states:
+
+```text
+correct_rate(generator, source)
+= # correct
+  / (# correct + # incorrect)
+```
+
+If `correct + incorrect = 0`, correct rate is undefined and reported diagnostically; it is not treated as either 0% or 100%.
+
 Hard failure conditions:
 
 - final generation completion after retry/resume is below 100%;
@@ -437,11 +497,10 @@ Warnings:
 - pooled or per-source generator share of positives or negatives exceeds 70%;
 - any generator/source correct rate is 0% or 100%;
 - per-source generator dominance reaches 90% or more, recorded as a strong warning;
-- ambiguous rate is unusually high.
 
 `ambiguous` is always reported separately and never merged into `incorrect`.
 
-Diagnostic-only outputs include Cramer's V, generator-by-label contingency tables, same-generator versus cross-generator pair proportions, source-wise and generator-wise correct rates, response length distributions, and positive-negative token-length gaps. The 40-question smoke is too small for significance claims from Cramer's V.
+Diagnostic-only outputs include ambiguous rate, Cramer's V, generator-by-label contingency tables, same-generator versus cross-generator pair proportions, source-wise and generator-wise correct rates, response length distributions, and positive-negative token-length gaps. Phase 2 v1 does not derive a warning from ambiguous rate because no deterministic threshold has been approved. The 40-question smoke is too small for significance claims from Cramer's V.
 
 Gate actions:
 
