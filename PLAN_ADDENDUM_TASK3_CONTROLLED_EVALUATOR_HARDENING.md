@@ -1,6 +1,6 @@
 # Permutation-GRPO 项目补充说明：Task 3 Controlled Evaluator Hardening
 
-> **用途**：本文件补充 `PLAN.md` 与现有各项 addendum，用于固定 Task 3 的目标、已完成内容、正式实验使用规范、验收标准，以及当前仍需补齐的非阻塞证据记录。
+> **用途**：本文件补充 `PLAN.md` 与现有各项 addendum，用于固定 Task 3 的目标、已完成内容、正式实验使用规范、验收标准，以及已补齐的测试证据记录。
 >
 > **Task 3 定位**：
 >
@@ -689,7 +689,7 @@ Task 1A   PASS
 Task 1.5  PASS
 Task 2A   PASS
 Task 2B   PASS
-Task 3    PASS（建议补测试 evidence artifact）
+Task 3    PASS（Windows + WSL2: 42 tests passed）
 ```
 
 下一阶段仍按原计划：
