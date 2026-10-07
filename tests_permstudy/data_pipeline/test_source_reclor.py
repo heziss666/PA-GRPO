@@ -14,7 +14,7 @@ import shutil
 import pytest
 
 from permstudy.data_pipeline import canonical, ids, io, isolation
-from permstudy.data_pipeline.schema import ArtifactRef, QuestionRecord, Source
+from permstudy.data_pipeline.schema import ArtifactRef, QuestionRecord, RunManifest, Source
 from permstudy.data_pipeline.sources import SourceSnapshot, reclor
 
 
@@ -273,17 +273,25 @@ def test_mutating_any_one_official_file_changes_the_tree_hash(tmp_path, mutated)
     baseline = load(FIXTURE_DIR, tmp_path / "baseline")
 
     def mutate(tree):
-        if mutated.endswith(".json"):
-            rows = load_train_rows(tree)
-            extra = json.loads(json.dumps(rows[0]))
-            extra["id_string"] = f"{extra['id_string']}-mutated"
-            write_train_rows(tree, rows + [extra])
-        else:
-            (tree / mutated).write_text((tree / mutated).read_text(encoding="utf-8") + "0\n", encoding="utf-8")
+        # Touch this file's own bytes, whatever its type: a trailing space keeps
+        # the JSON files valid and the held-out files are never parsed at all.
+        target = tree / mutated
+        target.write_bytes(target.read_bytes() + b" ")
 
     changed = load(derived_tree(tmp_path, mutate), tmp_path / "changed")
-    assert changed.source_snapshot_id != baseline.source_snapshot_id
+    baseline_hashes = {
+        entry["relative_path"]: entry["sha256"] for entry in baseline.private_manifest["tree_manifest"]["files"]
+    }
+    changed_hashes = {
+        entry["relative_path"]: entry["sha256"] for entry in changed.private_manifest["tree_manifest"]["files"]
+    }
+    assert changed_hashes[mutated] != baseline_hashes[mutated]
+    assert {name: value for name, value in changed_hashes.items() if name != mutated} == {
+        name: value for name, value in baseline_hashes.items() if name != mutated
+    }
     assert changed.private_manifest["tree_manifest_hash"] != baseline.private_manifest["tree_manifest_hash"]
+    assert changed.source_snapshot_id != baseline.source_snapshot_id
+    assert changed.private_manifest["source_snapshot_id"] != baseline.private_manifest["source_snapshot_id"]
 
 
 def test_snapshot_id_is_the_hash_of_the_canonical_tree_manifest_bytes(tmp_path):
@@ -293,6 +301,56 @@ def test_snapshot_id_is_the_hash_of_the_canonical_tree_manifest_bytes(tmp_path):
         canonical.canonical_json_bytes(manifest["tree_manifest"])
     )
     assert re.fullmatch(r"[0-9a-f]{64}", snapshot.source_snapshot_id)
+
+
+# The final private-manifest key list: the RunManifest-shaped envelope plus the
+# source-acquisition fields the brief requires. Task 6 mirrors this shape.
+EXPECTED_MANIFEST_KEYS = frozenset({
+    "schema_version", "stage", "run_id", "config_hash", "upstream_manifest_hashes",
+    "artifacts", "counts", "created_at_utc", "output_manifest_hash",
+    "source", "source_revision", "source_snapshot_id", "license_scope",
+    "noncommercial_acknowledged", "question_normalization_version",
+    "source_file_hashes", "tree_manifest", "tree_manifest_hash", "deduplication",
+})
+
+
+def test_private_manifest_carries_the_full_run_manifest_shape(tmp_path):
+    snapshot = load(FIXTURE_DIR, tmp_path / "external")
+    manifest = snapshot.private_manifest
+    assert set(manifest) == EXPECTED_MANIFEST_KEYS
+    RunManifest(
+        schema_version=manifest["schema_version"],
+        stage=manifest["stage"],
+        run_id=manifest["run_id"],
+        config_hash=manifest["config_hash"],
+        upstream_manifest_hashes=tuple(manifest["upstream_manifest_hashes"]),
+        artifacts=tuple(ArtifactRef(**artifact) for artifact in manifest["artifacts"]),
+        counts=manifest["counts"],
+        created_at_utc=manifest["created_at_utc"],
+        output_manifest_hash=manifest["output_manifest_hash"],
+    ).validate()
+    assert manifest["stage"] == "sources"
+    # This stage's only manifest-shaped upstream is its own canonical source tree.
+    assert manifest["upstream_manifest_hashes"] == [manifest["tree_manifest_hash"]]
+    # Ruling 4: the added envelope fields must not move the snapshot identity.
+    assert manifest["source_snapshot_id"] == manifest["tree_manifest_hash"] == snapshot.source_snapshot_id
+    expected_config = {
+        "license_scope": "non_commercial_research",
+        "question_normalization_version": "question_normalization_v1",
+        "required_source_files": sorted(OFFICIAL_FILES),
+        "source": "reclor",
+        "source_snapshot_id": snapshot.source_snapshot_id,
+    }
+    assert manifest["config_hash"] == canonical.sha256_hex(canonical.canonical_json_bytes(expected_config))
+    assert manifest["run_id"] == ids.run_id("sources", expected_config)
+
+
+def test_output_manifest_hash_excludes_the_envelope_fields(tmp_path):
+    snapshot = load(FIXTURE_DIR, tmp_path / "external")
+    manifest = dict(snapshot.private_manifest)
+    envelope = {key: value for key, value in manifest.items() if key not in {"created_at_utc", "output_manifest_hash"}}
+    assert manifest["output_manifest_hash"] == canonical.sha256_hex(canonical.canonical_json_bytes(envelope))
+    assert manifest["created_at_utc"].endswith("Z")
 
 
 def test_crlf_materialization_changes_the_snapshot_id_but_not_record_content(tmp_path):

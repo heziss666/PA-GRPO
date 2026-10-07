@@ -9,11 +9,15 @@ Only ``train.json`` produces ``QuestionRecord`` values; the validation, test,
 and use-item files participate in snapshot integrity alone.
 
 Every canonical byte sequence and digest comes from ``data_pipeline.canonical``
-and every question identity from ``data_pipeline.ids``. Records are appended
-through ``data_pipeline.io``'s append-only JSONL helper and the private manifest
-is swapped in atomically, so one snapshot always produces the same bytes. The
-private manifest carries hashes, counts, and provenance identifiers only: never
-source text and never user absolute paths.
+and every question identity and run identity from ``data_pipeline.ids``. Records
+are appended through ``data_pipeline.io``'s append-only JSONL helper and the
+private manifest is swapped in atomically, so one snapshot always produces the
+same bytes. The private manifest is a ``RunManifest``-shaped envelope
+(``schema_version``, ``stage``, ``run_id``, ``config_hash``,
+``upstream_manifest_hashes``, ``artifacts``, ``counts``, ``created_at_utc``,
+``output_manifest_hash``) extended with the source-acquisition fields, and it
+carries hashes, counts, and provenance identifiers only: never source text and
+never user absolute paths.
 """
 
 from collections.abc import Mapping, Sequence
@@ -25,7 +29,7 @@ from pathlib import Path
 import permstudy
 
 from ..canonical import canonical_json_bytes, normalize_text_v1, sha256_hex
-from ..ids import reclor_content_hash
+from .. import ids
 from ..io import IntegrityError, append_record, scan_jsonl, verify_artifact_ref, write_atomic_manifest
 from ..isolation import validate_external_roots
 from ..schema import ArtifactRef, QuestionRecord, Source
@@ -40,6 +44,7 @@ QUESTION_ID_PREFIX = "reclor:train:"
 LICENSE_SCOPE = "non_commercial_research"
 NORMALIZATION_VERSION = "question_normalization_v1"
 MANIFEST_SCHEMA_VERSION = "reclor_source_manifest_v1"
+MANIFEST_STAGE = "sources"
 TREE_MANIFEST_SCHEMA_VERSION = "source_tree_v1"
 PUBLIC_EVIDENCE_SCHEMA_VERSION = "reclor_source_evidence_v1"
 OFFICIAL_TRAIN_FILE = "train.json"
@@ -110,8 +115,29 @@ def load_reclor_train(source_path, data_root, *, acknowledge_noncommercial: bool
     relative_questions, questions_sha256, record_count = _write_questions(data_root, snapshot_id, records)
     artifact = ArtifactRef(relative_questions, questions_sha256, record_count)
     verify_artifact_ref(data_root, artifact)
+    config = _acquisition_config(snapshot_id)
     payload = {
+        # The RunManifest-shaped envelope every layer records. ``created_at_utc``
+        # and ``output_manifest_hash`` are stamped by write_atomic_manifest and
+        # excluded from the payload it digests.
         "schema_version": MANIFEST_SCHEMA_VERSION,
+        "stage": MANIFEST_STAGE,
+        "run_id": ids.run_id(MANIFEST_STAGE, config),
+        "config_hash": sha256_hex(canonical_json_bytes(config)),
+        # The direct upstream of this stage is the canonical source tree itself.
+        "upstream_manifest_hashes": [snapshot_id],
+        "artifacts": [{
+            "relative_path": artifact.relative_path,
+            "sha256": artifact.sha256,
+            "record_count": artifact.record_count,
+        }],
+        "counts": {
+            "train_rows": len(rows),
+            "questions": record_count,
+            "duplicate_groups": deduplication["group_count"],
+            "duplicate_rows_dropped": deduplication["dropped_row_count"],
+        },
+        # Source-acquisition fields: the brief's contents are a minimum, not an exclusion.
         "source": Source.RECLOR.value,
         "source_revision": snapshot_id,
         "source_snapshot_id": snapshot_id,
@@ -121,18 +147,7 @@ def load_reclor_train(source_path, data_root, *, acknowledge_noncommercial: bool
         "source_file_hashes": file_hashes,
         "tree_manifest": tree_manifest,
         "tree_manifest_hash": snapshot_id,
-        "counts": {
-            "train_rows": len(rows),
-            "questions": record_count,
-            "duplicate_groups": deduplication["group_count"],
-            "duplicate_rows_dropped": deduplication["dropped_row_count"],
-        },
         "deduplication": deduplication,
-        "artifacts": [{
-            "relative_path": artifact.relative_path,
-            "sha256": artifact.sha256,
-            "record_count": artifact.record_count,
-        }],
     }
     manifest_file = data_root / "sources" / "reclor" / snapshot_id / "manifest.json"
     output_manifest_hash = write_atomic_manifest(manifest_file, payload)
@@ -145,6 +160,23 @@ def load_reclor_train(source_path, data_root, *, acknowledge_noncommercial: bool
     )
     snapshot.validate()
     return snapshot
+
+
+def _acquisition_config(snapshot_id: str) -> dict[str, object]:
+    """Return the canonical configuration of one acquisition run.
+
+    The configuration is deliberately machine-independent: the source directory
+    path must never reach a manifest, and a path-free configuration keeps the
+    manifest payload — and therefore ``output_manifest_hash`` — reproducible
+    across Windows and WSL.
+    """
+    return {
+        "license_scope": LICENSE_SCOPE,
+        "question_normalization_version": NORMALIZATION_VERSION,
+        "required_source_files": list(REQUIRED_SOURCE_FILES),
+        "source": Source.RECLOR.value,
+        "source_snapshot_id": snapshot_id,
+    }
 
 
 def public_reclor_evidence(snapshot: SourceSnapshot) -> dict[str, object]:
@@ -248,7 +280,7 @@ def _validated_row(row: object, position: int) -> _TrainingRow:
         answers=ordered,
         gold_label=gold_label,
         synthetic=synthetic,
-        content_hash=reclor_content_hash(context, question, ordered),
+        content_hash=ids.reclor_content_hash(context, question, ordered),
     )
 
 

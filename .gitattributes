@@ -1,0 +1,7 @@
+# Committed data-pipeline fixtures are hashed as raw bytes to derive
+# content-addressed source snapshot ids, so their checkout form must be
+# platform-stable. Without this rule a fresh Windows checkout (core.autocrlf)
+# materialises CRLF while WSL gets LF, which would change the fixture tree hash
+# and every downstream hash that binds the source snapshot id.
+# Scoped to the fixture tree only, so no unrelated path is affected.
+tests_permstudy/fixtures/data_pipeline/** text eol=lf
