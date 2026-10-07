@@ -83,6 +83,7 @@ def _effective_caches(env: Mapping[str, str]) -> dict[str, Path]:
     datasets_home = Path(os.path.expanduser(env.get("HF_HOME", datasets_base)))
     datasets_cache = Path(env.get("HF_DATASETS_CACHE", str(datasets_home / "datasets")))
     default_downloads = datasets_cache / "downloads"
+    downloads = Path(env.get("HF_DATASETS_DOWNLOADED_DATASETS_PATH", str(default_downloads)))
     hub = _cache_path(env.get("HF_HUB_CACHE", env.get("HUGGINGFACE_HUB_CACHE", str(hf_home / "hub"))))
     assets = _cache_path(env.get("HF_ASSETS_CACHE", env.get("HUGGINGFACE_ASSETS_CACHE", str(hf_home / "assets"))))
     legacy_bert = env.get("PYTORCH_PRETRAINED_BERT_CACHE", str(hub))
@@ -93,10 +94,15 @@ def _effective_caches(env: Mapping[str, str]) -> dict[str, Path]:
         "TRANSFORMERS_CACHE": Path(env.get("TRANSFORMERS_CACHE", legacy_transformers)),
         "HF_DATASETS_CACHE": datasets_cache,
         "HF_MODULES_CACHE": Path(env.get("HF_MODULES_CACHE", str(datasets_home / "modules"))),
-        "HF_DATASETS_DOWNLOADED_DATASETS_PATH": Path(env.get("HF_DATASETS_DOWNLOADED_DATASETS_PATH", str(default_downloads))),
-        # Pinned datasets derives extraction from default downloads, even when
-        # HF_DATASETS_DOWNLOADED_DATASETS_PATH redirects download storage.
-        "HF_DATASETS_EXTRACTED_DATASETS_PATH": Path(env.get("HF_DATASETS_EXTRACTED_DATASETS_PATH", str(default_downloads / "extracted"))),
+        "HF_DATASETS_DOWNLOADED_DATASETS_PATH": downloads,
+        # datasets derives extraction from two different downloads roots. The
+        # library default for config.EXTRACTED_DATASETS_PATH follows the default
+        # downloads path even when downloads are redirected, while ExtractManager
+        # derives '<effective downloads>/extracted'. Validate both derivations so
+        # an external downloads override cannot hide a repository-local
+        # extraction cache behind an external parent.
+        "HF_DATASETS_DEFAULT_EXTRACTED_DATASETS_PATH": default_downloads / "extracted",
+        "HF_DATASETS_EXTRACTED_DATASETS_PATH_FROM_DOWNLOADS": downloads / "extracted",
         "HF_ASSETS_CACHE": assets,
         # The pinned hub expands home/hub/assets, but keeps Xet overrides literal.
         "HF_XET_CACHE": Path(env.get("HF_XET_CACHE", str(hf_home / "xet"))),
@@ -105,6 +111,9 @@ def _effective_caches(env: Mapping[str, str]) -> dict[str, Path]:
     for kind in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HUGGINGFACE_ASSETS_CACHE", "PYTORCH_PRETRAINED_BERT_CACHE", "PYTORCH_TRANSFORMERS_CACHE"):
         if kind in env:
             caches[kind] = (Path(env[kind]) if kind.startswith("PYTORCH_") else _cache_path(env[kind]))
+    if "HF_DATASETS_EXTRACTED_DATASETS_PATH" in env:
+        # The explicit datasets extraction override stays a literal path.
+        caches["HF_DATASETS_EXTRACTED_DATASETS_PATH"] = Path(env["HF_DATASETS_EXTRACTED_DATASETS_PATH"])
     return caches
 
 

@@ -292,14 +292,62 @@ def test_datasets_default_paths_resolve_repository_aliases(tmp_path, cache_shape
         isolation.validate_external_roots(repo, tmp_path / "data", external_env(tmp_path))
 
 
-def test_datasets_extracted_default_follows_default_downloads_not_override(tmp_path):
+@pytest.mark.parametrize("derivation", ["config_default", "download_override"])
+def test_datasets_extraction_derivations_resolve_repository_aliases(tmp_path, derivation):
     isolation = load_isolation()
-    # In pinned datasets, extracted defaults from HF_DATASETS_CACHE/downloads,
-    # even when downloaded datasets are redirected to a different external root.
-    env = external_env(tmp_path)
-    env["HF_DATASETS_DOWNLOADED_DATASETS_PATH"] = str(tmp_path / "other-downloads")
     repo = tmp_path / "repo"
     repo.mkdir()
+    env = external_env(tmp_path)
+    if derivation == "download_override":
+        # Pinned ExtractManager derives '<effective downloads>/extracted' whenever
+        # a cache directory is passed, so redirecting downloads to an external root
+        # moves the extraction directory with it. That derived location must also be
+        # validated, or an external downloads override can smuggle a repository-local
+        # extraction cache past the check while its parent looks external.
+        env["HF_DATASETS_DOWNLOADED_DATASETS_PATH"] = str(tmp_path / "other-downloads")
+        alias = tmp_path / "other-downloads" / "extracted"
+    else:
+        # The library default for config.EXTRACTED_DATASETS_PATH derives from the
+        # default downloads path, so that derivation must stay validated on its own.
+        alias = tmp_path / "cache" / "datasets" / "downloads" / "extracted"
+    alias.parent.mkdir(parents=True)
+    if os.name == "nt":
+        created = subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(repo)], capture_output=True)
+        if created.returncode:
+            pytest.skip("OS does not permit junctions")
+    else:
+        alias.symlink_to(repo, target_is_directory=True)
+    with pytest.raises(isolation.IsolationError, match="cache"):
+        isolation.validate_external_roots(repo, tmp_path / "data", env)
+
+
+def test_datasets_extraction_derivations_are_reported_without_paths(tmp_path):
+    isolation = load_isolation()
+    env = external_env(tmp_path)
+    env["HF_DATASETS_DOWNLOADED_DATASETS_PATH"] = str(tmp_path / "other-downloads")
+    report = isolation.validate_external_roots(tmp_path / "repo", tmp_path / "data", env)
+    kinds = set(report.effective_cache_kinds)
+    # Both derivation models stay in the validated set: the library default that
+    # follows the default downloads path, and the ExtractManager derivation that
+    # follows the effective downloads path.
+    assert {"HF_DATASETS_DEFAULT_EXTRACTED_DATASETS_PATH",
+            "HF_DATASETS_EXTRACTED_DATASETS_PATH_FROM_DOWNLOADS"} <= kinds
+    # An explicit extraction override joins the validated set as its own kind.
+    env["HF_DATASETS_EXTRACTED_DATASETS_PATH"] = str(tmp_path / "external-extracted")
+    overridden = isolation.validate_external_roots(tmp_path / "repo", tmp_path / "data", env)
+    assert "HF_DATASETS_EXTRACTED_DATASETS_PATH" in set(overridden.effective_cache_kinds)
+    assert str(tmp_path) not in repr(report) and str(tmp_path) not in repr(overridden)
+
+
+def test_datasets_extraction_override_derivation_is_always_validated(tmp_path):
+    isolation = load_isolation()
+    # With both datasets path overrides external, the ExtractManager derivation and
+    # the library default derivation must still be validated independently.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = external_env(tmp_path)
+    env["HF_DATASETS_DOWNLOADED_DATASETS_PATH"] = str(tmp_path / "other-downloads")
+    env["HF_DATASETS_EXTRACTED_DATASETS_PATH"] = str(tmp_path / "external-extracted")
     alias = tmp_path / "cache" / "datasets" / "downloads" / "extracted"
     alias.parent.mkdir(parents=True)
     if os.name == "nt":
