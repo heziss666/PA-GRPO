@@ -201,6 +201,57 @@ def test_aggregate_metadata_and_model_identifiers_remain_supported():
     assert isolation.sanitize_public_manifest(payload) == payload
 
 
+@pytest.mark.parametrize("key", ["LLMRESPONSE", "QUESTIONTEXT", "RAWANSWER", "GOLDVALUE", "PROMPTLLM", "SOLUTIONRAW", "CONTEXTTEXT"])
+def test_fused_uppercase_sensitive_keys_are_rejected(key):
+    isolation = load_isolation()
+    with pytest.raises(isolation.SafeLoggingError):
+        isolation.sanitize_public_manifest({"aggregate_statistics": {key: "synthetic-secret"}})
+
+
+@pytest.mark.parametrize("value", ["failed-/private/user/data", "prefix/private/user/data", "org/model",
+                                    "prefix/C:/private/user/data", "prefix\\private\\user\\data", "prefix/file:/private/user/data"])
+@pytest.mark.parametrize("field", ["aggregate_statistics", "phase_status"])
+def test_general_metadata_fields_reject_embedded_paths(field, value):
+    isolation = load_isolation()
+    payload = {field: {"mean": value} if field == "aggregate_statistics" else value}
+    with pytest.raises(isolation.SafeLoggingError):
+        isolation.sanitize_public_manifest(payload)
+
+
+def test_only_explicit_repository_fields_accept_repository_identifiers():
+    isolation = load_isolation()
+    manifest = {"source": "org/dataset", "generator_model": "org/model", "phase_status": "code_complete", "aggregate_statistics": {"mean": 1.25, "method": "bootstrap_v1"}}
+    evidence = {"source_revisions": {"org/dataset": "a" * 40}, "completion_counts": {"ok": 4}, "stratification_level": {"math": "category_level"}}
+    assert isolation.sanitize_public_manifest(manifest) == manifest
+    assert isolation.sanitize_public_manifest(evidence) == evidence
+
+
+@pytest.mark.parametrize("home_kind", ["HF_HOME", "XDG_CACHE_HOME"])
+def test_datasets_default_keeps_environment_variable_syntax_literal(tmp_path, monkeypatch, home_kind):
+    isolation = load_isolation()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("PAGRPO_REVIEW_EXTERNAL", str(tmp_path / "external"))
+    env = {home_kind: "$PAGRPO_REVIEW_EXTERNAL/hf"}
+    # Hub expands this to external storage; datasets only expands '~', so its
+    # default remains relative to the repo's current working directory.
+    with pytest.raises(isolation.IsolationError, match="cache"):
+        isolation.validate_external_roots(repo, tmp_path / "data", env)
+
+
+def test_explicit_datasets_override_remains_literal(tmp_path, monkeypatch):
+    isolation = load_isolation()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("PAGRPO_REVIEW_EXTERNAL", str(tmp_path / "external"))
+    env = external_env(tmp_path)
+    env["HF_DATASETS_CACHE"] = "$PAGRPO_REVIEW_EXTERNAL/datasets"
+    with pytest.raises(isolation.IsolationError, match="cache"):
+        isolation.validate_external_roots(repo, tmp_path / "data", env)
+
+
 @pytest.mark.parametrize("fields", [
     {"response": "synthetic secret"}, {"HF_TOKEN": "hf_syntheticsecret"},
     {"candidate_id": "/private/secret"}, {"candidate_id": "C:\\private\\secret"},

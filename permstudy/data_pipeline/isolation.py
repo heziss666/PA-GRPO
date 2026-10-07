@@ -51,6 +51,7 @@ _SENSITIVE_WORDS = frozenset({
 })
 _SAFE_STRING = re.compile(r"[A-Za-z0-9_./+@=,()\-]+\Z")
 _SAFE_CODE = re.compile(r"[A-Za-z0-9_.\-]+\Z")
+_SAFE_REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]*/[A-Za-z0-9][A-Za-z0-9_.\-]*\Z")
 _EMBEDDED_PATH = re.compile(r"//|(?:^|[=,(@])/")
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -75,6 +76,9 @@ def _contains(parent: str, child: str) -> bool:
 def _effective_caches(env: Mapping[str, str]) -> dict[str, Path]:
     cache_base = Path(env.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
     hf_home = _cache_path(env.get("HF_HOME", str(cache_base / "huggingface")))
+    # datasets 4.4.1 expands only '~', unlike huggingface_hub's HF_HOME.
+    datasets_base = os.path.join(env.get("XDG_CACHE_HOME", "~/.cache"), "huggingface")
+    datasets_home = Path(os.path.expanduser(env.get("HF_HOME", datasets_base)))
     hub = _cache_path(env.get("HF_HUB_CACHE", env.get("HUGGINGFACE_HUB_CACHE", str(hf_home / "hub"))))
     assets = _cache_path(env.get("HF_ASSETS_CACHE", env.get("HUGGINGFACE_ASSETS_CACHE", str(hf_home / "assets"))))
     legacy_bert = env.get("PYTORCH_PRETRAINED_BERT_CACHE", str(hub))
@@ -83,7 +87,7 @@ def _effective_caches(env: Mapping[str, str]) -> dict[str, Path]:
         "HF_HOME": hf_home,
         "HUGGINGFACE_HUB_CACHE": hub,
         "TRANSFORMERS_CACHE": Path(env.get("TRANSFORMERS_CACHE", legacy_transformers)),
-        "HF_DATASETS_CACHE": Path(env.get("HF_DATASETS_CACHE", str(hf_home / "datasets"))),
+        "HF_DATASETS_CACHE": Path(env.get("HF_DATASETS_CACHE", str(datasets_home / "datasets"))),
         "HF_ASSETS_CACHE": assets,
         # The pinned hub expands home/hub/assets, but keeps Xet overrides literal.
         "HF_XET_CACHE": Path(env.get("HF_XET_CACHE", str(hf_home / "xet"))),
@@ -136,10 +140,11 @@ def sanitize_exception(error: BaseException) -> str:
     return "unexpected_error"
 
 
-def _safe_string(value: object) -> bool:
+def _safe_string(value: object, *, repository: bool = False) -> bool:
     return (
         isinstance(value, str)
         and bool(_SAFE_STRING.fullmatch(value))
+        and ("/" not in value or (repository and bool(_SAFE_REPOSITORY.fullmatch(value))))
         and not value.startswith("/")
         and not _EMBEDDED_PATH.search(value)
         and not PureWindowsPath(value).drive
@@ -172,13 +177,11 @@ def safe_log_fields(fields: Mapping[str, object]) -> dict[str, object]:
     return result
 
 
-def _nested(value: object, kind: str = "scalar") -> object:
+def _nested(value: object, kind: str = "scalar", *, repository_keys: bool = False, repository_value: bool = False) -> object:
     if isinstance(value, Mapping):
         result = {}
         for key, item in value.items():
-            words = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key) if isinstance(key, str) else ""
-            words = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", words)
-            if not _safe_string(key) or set(re.split(r"[^a-z0-9]+", words.lower())) & _SENSITIVE_WORDS:
+            if not _safe_string(key, repository=repository_keys) or any(word in key.lower() for word in _SENSITIVE_WORDS):
                 raise SafeLoggingError("public manifest contains unsafe nested fields")
             result[key] = _nested(item, kind)
         return result
@@ -191,7 +194,7 @@ def _nested(value: object, kind: str = "scalar") -> object:
     elif kind == "version":
         valid = _safe_string(value)
     else:
-        valid = value is None or type(value) is bool or _number(value) or _safe_string(value)
+        valid = value is None or type(value) is bool or _number(value) or _safe_string(value, repository=repository_value)
     if not valid:
         raise SafeLoggingError("public manifest contains unsafe nested values")
     return value
@@ -217,11 +220,12 @@ def sanitize_public_manifest(payload: Mapping[str, object]) -> dict[str, object]
             "run_id", "source", "source_revision", "generator_model", "generator_revision",
             "phase_status", "git_sha", "platform", "python_version", "schema_version",
         }
-        if key in scalar_fields and not _safe_string(value):
+        repository_value = key in {"source", "generator_model"}
+        if key in scalar_fields and not _safe_string(value, repository=repository_value):
             raise SafeLoggingError("public manifest contains unsafe scalar values")
         if key.endswith("_count") and not _count(value):
             raise SafeLoggingError("public manifest contains unsafe count values")
         if key.endswith(("_hash", "_sha256")) and not (isinstance(value, str) and _HASH.fullmatch(value)):
             raise SafeLoggingError("public manifest contains unsafe hash values")
-        result[key] = _nested(value, kind)
+        result[key] = _nested(value, kind, repository_keys=key == "source_revisions", repository_value=repository_value)
     return result
