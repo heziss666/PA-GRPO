@@ -478,7 +478,14 @@ def _read_adapter_arrays(adapter_path: Path) -> dict[str, np.ndarray]:
     )
 
 
-def inspect_lora(adapter_candidates: Sequence[Path]) -> dict[str, Any]:
+def merged_adapter_path(run_dir: Path) -> Path:
+    """Where `verl.model_merger merge --target_dir …/actor/hf` actually writes the adapter."""
+    return (
+        run_dir / "checkpoints" / "global_step_2" / "actor" / "hf" / "lora_adapter" / "adapter_model.safetensors"
+    )
+
+
+def inspect_lora(adapter_candidates: Sequence[Path], run_dir: Path) -> dict[str, Any]:
     existing = [path for path in adapter_candidates if path.is_file()]
     if not existing:
         raise EvidenceError(
@@ -496,16 +503,47 @@ def inspect_lora(adapter_candidates: Sequence[Path]) -> dict[str, Any]:
     return {
         "adapter": adapter_path.name,
         "adapter_path": str(adapter_path),
-        "adapter_source": (
-            "explicit"
-            if len(adapter_candidates) == 1
-            else ("merger_output" if adapter_path == adapter_candidates[0] else "trainer_checkpoint")
-        ),
+        # Task 4 requires the step-2 checkpoint to merge successfully and the MERGED adapter to be
+        # loadable, so only the merger's own output can satisfy the contract. A trainer-saved
+        # adapter, or one supplied from elsewhere, is accepted as evidence but not as a PASS.
+        "adapter_source": "merger_output" if adapter_path == merged_adapter_path(run_dir) else "explicit",
+        "expected_merged_path": str(merged_adapter_path(run_dir)),
         "tensor_count": len(arrays),
         "lora_b_tensor_count": len(lora_b_names),
         "lora_b_tensors": lora_b_names,
         "all_finite": all_finite,
         "nonzero_lora_b": nonzero_lora_b,
+    }
+
+
+def inspect_adapter_config(adapter_path: Path, expected_rank: int, expected_alpha: int) -> dict[str, Any]:
+    """Read `adapter_config.json` and report the LoRA rank and scaling.
+
+    `verl/model_merger/base_model_merger.py:266-269` hardcodes ``"lora_alpha": 0`` (with a
+    comment saying an error should be raised), while training uses ``lora_rank=32`` and
+    ``lora_alpha=64``. PEFT scales a LoRA update by ``alpha / r``, so a merged adapter left at
+    ``0/32 = 0`` would zero the trained delta during evaluation: a non-zero ``lora_B`` alone
+    does not prove the controlled evaluation saw the trained adapter.
+    """
+    config_path = adapter_path.parent / "adapter_config.json"
+    if not config_path.is_file():
+        raise EvidenceError(f"missing adapter_config.json next to {adapter_path.name}")
+    payload = _read_json(config_path, "adapter_config.json")
+    if not isinstance(payload, Mapping):
+        raise EvidenceError("adapter_config.json must be a JSON object")
+    for key in ("r", "lora_alpha"):
+        if key not in payload:
+            raise EvidenceError(f"adapter_config.json is missing {key}")
+    rank = _as_int(payload["r"], what="adapter_config.r")
+    alpha = _as_int(payload["lora_alpha"], what="adapter_config.lora_alpha")
+    return {
+        "path": config_path.name,
+        "r": rank,
+        "lora_alpha": alpha,
+        "expected_rank": expected_rank,
+        "expected_alpha": expected_alpha,
+        "scaling": (alpha / rank) if rank else None,
+        "expected_scaling": (expected_alpha / expected_rank) if expected_rank else None,
     }
 
 
@@ -589,6 +627,8 @@ def verify_real_gpu_smoke(
     expected_eval_contract: str = "controlled",
     expected_num_options: int = 2,
     expected_num_samples: int = 4,
+    expected_lora_rank: int = 32,
+    expected_lora_alpha: int = 64,
     write_summaries: bool = True,
 ) -> dict[str, Any]:
     run_dir = paths.run_dir
@@ -649,7 +689,10 @@ def verify_real_gpu_smoke(
 
     rollouts = inspect_rollouts(paths.rollout_dir, expected_steps)
     checkpoints = inspect_checkpoints(paths.checkpoint_dir, expected_steps)
-    lora = inspect_lora(paths.merged_adapter_candidates)
+    lora = inspect_lora(paths.merged_adapter_candidates, run_dir)
+    adapter_config = inspect_adapter_config(
+        Path(lora["adapter_path"]), expected_lora_rank, expected_lora_alpha
+    )
     controlled_eval = inspect_controlled_eval(
         paths.controlled_eval_dir, expected_eval_contract, expected_num_options, expected_num_samples
     )
@@ -753,12 +796,29 @@ def verify_real_gpu_smoke(
             f"expected {int(expected_steps[-1])}"
         )
 
+    if lora["adapter_source"] != "merger_output":
+        failures.append(
+            "the verified LoRA adapter is not the merged step-2 adapter "
+            f"({lora['expected_merged_path']}); the Task 4 contract requires the checkpoint to merge "
+            "successfully, so a trainer-saved or substituted adapter cannot satisfy it"
+        )
     if not lora["all_finite"]:
         failures.append("merged LoRA adapter contains non-finite tensors")
     if lora["lora_b_tensor_count"] == 0:
         failures.append("merged LoRA adapter contains no lora_B tensor")
     elif not lora["nonzero_lora_b"]:
         failures.append("every lora_B tensor is zero: no optimizer update was saved")
+    if adapter_config["r"] != expected_lora_rank:
+        failures.append(
+            f"merged adapter rank r is {adapter_config['r']}, expected {expected_lora_rank}"
+        )
+    if adapter_config["lora_alpha"] != expected_lora_alpha:
+        failures.append(
+            f"merged adapter lora_alpha is {adapter_config['lora_alpha']}, expected "
+            f"{expected_lora_alpha}: PEFT scales the LoRA delta by alpha/r, so the merged config "
+            f"({adapter_config['scaling']}) would not match training "
+            f"({adapter_config['expected_scaling']}) and the evaluation would not see the trained adapter"
+        )
 
     if controlled_eval["evaluation_contracts"] != [expected_eval_contract]:
         failures.append(
@@ -791,6 +851,7 @@ def verify_real_gpu_smoke(
         "identity": identity,
         "checkpoints": checkpoints,
         "lora": lora,
+        "adapter_config": adapter_config,
         "controlled_eval": controlled_eval,
         "failures": failures,
         "passed": not failures,
@@ -826,6 +887,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rollout-dir", default=None)
     parser.add_argument("--checkpoint-dir", default=None)
     parser.add_argument("--merged-adapter", default=None)
+    parser.add_argument("--expected-lora-rank", type=int, default=32)
+    parser.add_argument("--expected-lora-alpha", type=int, default=64)
     parser.add_argument("--controlled-eval-dir", default=None)
     parser.add_argument("--expected-eval-contract", default="controlled")
     parser.add_argument("--expected-num-options", type=int, default=2)
@@ -847,12 +910,7 @@ def resolve_paths(args: argparse.Namespace) -> VerifyPaths:
         merged_adapter_candidates=(
             [Path(args.merged_adapter)]
             if args.merged_adapter
-            else [
-                # what `verl/model_merger merge --target_dir …/actor/hf` writes
-                run_dir / "checkpoints" / "global_step_2" / "actor" / "hf" / "lora_adapter" / "adapter_model.safetensors",
-                # what the trainer's own checkpoint save writes
-                run_dir / "checkpoints" / "global_step_2" / "actor" / "lora_adapter" / "adapter_model.safetensors",
-            ]
+            else [merged_adapter_path(run_dir)]
         ),
         controlled_eval_dir=Path(args.controlled_eval_dir) if args.controlled_eval_dir else run_dir / "controlled_eval",
     )
@@ -866,6 +924,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_eval_contract=args.expected_eval_contract,
             expected_num_options=args.expected_num_options,
             expected_num_samples=args.expected_num_samples,
+            expected_lora_rank=args.expected_lora_rank,
+            expected_lora_alpha=args.expected_lora_alpha,
         )
     except EvidenceError as error:
         print(f"evidence error: {error}", file=sys.stderr)

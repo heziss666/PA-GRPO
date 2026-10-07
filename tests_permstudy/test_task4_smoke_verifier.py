@@ -217,6 +217,9 @@ def write_checkpoints(
     non_finite_tensor: bool = False,
     include_lora_b: bool = True,
     bfloat16: bool = False,
+    lora_rank: int = 32,
+    lora_alpha: int = 64,
+    adapter_config: bool = True,
 ) -> None:
     checkpoints = run_dir / "checkpoints"
     for step in steps:
@@ -226,6 +229,19 @@ def write_checkpoints(
     # `verl/model_merger merge --target_dir …/actor/hf` nests the adapter under lora_adapter/
     target = checkpoints / "global_step_2" / "actor" / "hf" / "lora_adapter"
     target.mkdir(parents=True, exist_ok=True)
+    if adapter_config:
+        (target / "adapter_config.json").write_text(
+            json.dumps(
+                {
+                    "r": lora_rank,
+                    "lora_alpha": lora_alpha,
+                    "target_modules": ["q_proj"],
+                    "task_type": "CAUSAL_LM",
+                    "peft_type": "LORA",
+                }
+            ),
+            encoding="utf-8",
+        )
     if not adapter:
         return
     if bfloat16:
@@ -330,6 +346,9 @@ def build_run(tmp_path: Path, **overrides):
         non_finite_tensor=overrides.get("non_finite_tensor", False),
         include_lora_b=overrides.get("include_lora_b", True),
         bfloat16=overrides.get("bfloat16", False),
+        lora_rank=overrides.get("lora_rank", 32),
+        lora_alpha=overrides.get("lora_alpha", 64),
+        adapter_config=overrides.get("adapter_config", True),
     )
     write_controlled_eval(
         run_dir,
@@ -350,7 +369,6 @@ def paths_for(verifier, run_dir: Path):
         checkpoint_dir=run_dir / "checkpoints",
         merged_adapter_candidates=[
             run_dir / "checkpoints" / "global_step_2" / "actor" / "hf" / "lora_adapter" / "adapter_model.safetensors",
-            run_dir / "checkpoints" / "global_step_2" / "actor" / "lora_adapter" / "adapter_model.safetensors",
         ],
         controlled_eval_dir=run_dir / "controlled_eval",
     )
@@ -599,7 +617,8 @@ def test_bfloat16_adapter_is_readable(tmp_path):
     assert summary["lora"]["nonzero_lora_b"] is True
 
 
-def test_trainer_saved_adapter_is_accepted_as_a_fallback(tmp_path):
+def test_trainer_saved_adapter_cannot_satisfy_the_merge_contract(tmp_path):
+    """Task 4 requires the step-2 checkpoint to MERGE; a trainer-saved adapter is not that."""
     verifier = load_verifier()
     run_dir = build_run(tmp_path)
     merged = run_dir / "checkpoints" / "global_step_2" / "actor" / "hf" / "lora_adapter"
@@ -608,8 +627,46 @@ def test_trainer_saved_adapter_is_accepted_as_a_fallback(tmp_path):
     for item in merged.iterdir():
         item.rename(trainer_saved / item.name)
     merged.rmdir()
-    summary = verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
-    assert summary["lora"]["adapter_source"] == "trainer_checkpoint"
+    # the default candidate no longer considers the trainer-saved location at all
+    with pytest.raises(verifier.EvidenceError, match="missing merged LoRA adapter"):
+        verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+
+
+def test_an_explicitly_supplied_adapter_cannot_satisfy_the_merge_contract(tmp_path):
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path)
+    elsewhere = run_dir / "somewhere_else"
+    elsewhere.mkdir()
+    source = run_dir / "checkpoints" / "global_step_2" / "actor" / "hf" / "lora_adapter"
+    for item in source.iterdir():
+        item.rename(elsewhere / item.name)
+    source.rmdir()
+    paths = paths_for(verifier, run_dir)
+    paths.merged_adapter_candidates = [elsewhere / "adapter_model.safetensors"]
+    with pytest.raises(verifier.VerificationFailed, match="not the merged step-2 adapter"):
+        verifier.verify_real_gpu_smoke(paths)
+
+
+def test_merger_zero_lora_alpha_fails(tmp_path):
+    """`base_model_merger.py:266-269` writes lora_alpha 0, so alpha/r would be 0."""
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path, lora_alpha=0)
+    with pytest.raises(verifier.VerificationFailed, match="lora_alpha is 0"):
+        verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+
+
+def test_wrong_lora_rank_fails(tmp_path):
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path, lora_rank=16)
+    with pytest.raises(verifier.VerificationFailed, match="adapter rank r is 16"):
+        verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+
+
+def test_missing_adapter_config_fails(tmp_path):
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path, adapter_config=False)
+    with pytest.raises(verifier.EvidenceError, match="adapter_config.json"):
+        verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
 
 
 def test_vllm_gate_is_not_satisfied_by_the_config_echo(tmp_path):

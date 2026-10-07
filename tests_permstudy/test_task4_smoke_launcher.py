@@ -222,15 +222,18 @@ def test_relative_runtime_paths_are_absolutised_before_any_check():
     guard_index = text.index('if [ -e "$TASK4_RUN_DIR" ]')
     assert cd_index < guard_index, "the launcher must cd before the run-dir guard"
 
-    for variable in ("TASK4_RUN_DIR", "REWARD_LOG"):
-        absolutise = re.search(
-            r'case "\$%s" in\n\s*/\*\) ;;\n\s*\*\) %s="\$PROJECT_ROOT/\$%s" ;;\nesac' % (variable, variable, variable),
-            text,
-        )
-        assert absolutise is not None, f"{variable} must be absolutised against PROJECT_ROOT"
-        assert text.index(absolutise.group(0)) < guard_index, (
-            f"{variable} must be absolutised before the guards"
-        )
+    absolutise = re.search(
+        r'case "\$TASK4_RUN_DIR" in\n\s*/\*\) ;;\n\s*\*\) TASK4_RUN_DIR="\$PROJECT_ROOT/\$TASK4_RUN_DIR" ;;\nesac',
+        text,
+    )
+    assert absolutise is not None, "TASK4_RUN_DIR must be absolutised against PROJECT_ROOT"
+    assert text.index(absolutise.group(0)) < guard_index, "TASK4_RUN_DIR must be absolutised before the guards"
+    # REWARD_LOG is never taken from the environment, so it is absolute by construction, and it
+    # must be derived before the preconditions that create and probe it
+    assert 'REWARD_LOG="$PROJECT_ROOT/logs/judge_qwen3_8b.log"' in text
+    assert text.index('REWARD_LOG="$PROJECT_ROOT/logs/judge_qwen3_8b.log"') < text.index(
+        'mkdir -p "$(dirname "$REWARD_LOG")"'
+    )
 
 
 def test_tee_exit_status_is_checked():
@@ -244,10 +247,28 @@ def test_tee_exit_status_is_checked():
     assert re.search(r'if \[ "\$TEE_STATUS" -ne 0 \]', text), "tee's own status must gate success"
 
 
-def test_reward_log_readability_is_a_precondition_not_a_mid_run_abort():
+def test_reward_log_is_not_overridable_and_follows_the_reward_module(tmp_path):
+    """`judge_qwen.py:28-32` derives its log path from its own module and reads no env var."""
     text = launcher_text()
-    assert re.search(r'if \[ -e "\$REWARD_LOG" \] && \[ ! -r "\$REWARD_LOG" \]', text), (
-        "an unreadable reward log must be refused up front"
+    assert "REWARD_LOG=\"${REWARD_LOG" not in text, (
+        "a REWARD_LOG override would be a lie: the production reward never reads it"
+    )
+    assert 'REWARD_LOG="$PROJECT_ROOT/logs/judge_qwen3_8b.log"' in text
+    assert re.search(r'if \[ ! -f "\$PROJECT_ROOT/my_reward/judge_qwen\.py" \]', text), (
+        "PROJECT_ROOT must be proved to be the reward's own root"
+    )
+
+
+def test_reward_log_preconditions_cover_creation_readability_and_writability():
+    """A clean checkout has no logs/ dir, so step 1's evidence would be silently lost."""
+    text = launcher_text()
+    assert 'mkdir -p "$(dirname "$REWARD_LOG")"' in text, (
+        "the reward log's parent must exist before the trainer starts"
+    )
+    assert re.search(r'if ! touch "\$REWARD_LOG"; then', text), "the log must be created up front"
+    assert re.search(r'if \[ ! -r "\$REWARD_LOG" \]', text)
+    assert re.search(r'if \[ ! -w "\$REWARD_LOG" \]', text), (
+        "the log must be writable, since safe_log swallows a failed append"
     )
     assert 'if ! REWARD_LOG_START_BYTES="$(wc -c < "$REWARD_LOG"' in text, (
         "the reward-log sizing probe must not abort the run through `set -e`"
@@ -259,7 +280,8 @@ def test_run_dir_is_created_only_after_every_precondition():
     creation = text.index('mkdir -p "$TASK4_RUN_DIR"')
     for precondition in (
         'if [ -e "$TASK4_RUN_DIR" ]',
-        'if [ -e "$REWARD_LOG" ] && [ ! -r "$REWARD_LOG" ]',
+        'if [ ! -f "$PROJECT_ROOT/my_reward/judge_qwen.py" ]',
+        'mkdir -p "$(dirname "$REWARD_LOG")"',
         'if ! REWARD_LOG_START_BYTES="$(wc -c < "$REWARD_LOG"',
         "RESOLVED_CONFIG_TMP=",
     ):

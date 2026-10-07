@@ -22,8 +22,10 @@
 #   TASK4_RUN_DIR  absent or provably empty directory this run may own
 #
 # Optional environment:
-#   PROJECT_ROOT   repository root (defaults to the parent of this script)
-#   REWARD_LOG     reward log to window (defaults to logs/judge_qwen3_8b.log)
+#   PROJECT_ROOT   repository root (defaults to the parent of this script); it must
+#                  contain my_reward/judge_qwen.py, because the production reward derives
+#                  its log path from that module's location and reads no environment
+#                  variable, so the reward log is not overridable.
 #
 set -euo pipefail
 
@@ -33,7 +35,6 @@ set -euo pipefail
 : "${TASK4_RUN_DIR:?TASK4_RUN_DIR is required}"
 
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-REWARD_LOG="${REWARD_LOG:-$PROJECT_ROOT/logs/judge_qwen3_8b.log}"
 
 # The trainer needs CWD = repository root, and every path below must mean the same thing
 # for the checks and for the writes, so normalise before anything else runs.
@@ -41,10 +42,6 @@ cd "$PROJECT_ROOT"
 case "$TASK4_RUN_DIR" in
   /*) ;;
   *) TASK4_RUN_DIR="$PROJECT_ROOT/$TASK4_RUN_DIR" ;;
-esac
-case "$REWARD_LOG" in
-  /*) ;;
-  *) REWARD_LOG="$PROJECT_ROOT/$REWARD_LOG" ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -70,21 +67,46 @@ if [ -e "$TASK4_RUN_DIR" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Precondition 2: the reward log must be readable AND sizeable. Without a readable
-# reward log the run cannot produce its identity/reorder evidence, so this is
-# decided up front instead of aborting mid-way through evidence capture.
+# Precondition 2: PROJECT_ROOT must be the root the production reward belongs to.
+#
+# `my_reward/judge_qwen.py:28-32` derives its log path from its own module
+# location (`dirname(dirname(__file__))/logs/judge_qwen3_8b.log`) and never reads
+# the environment, so there is no legitimate way to point the reward at another
+# file. Requiring the module here makes PROJECT_ROOT provably that root and makes
+# the windowed path provably the reward's own LOG_PATH.
 # ---------------------------------------------------------------------------
-if [ -e "$REWARD_LOG" ] && [ ! -r "$REWARD_LOG" ]; then
-  echo "refusing to run: reward log exists but is not readable: $REWARD_LOG" >&2
+if [ ! -f "$PROJECT_ROOT/my_reward/judge_qwen.py" ]; then
+  echo "refusing to run: PROJECT_ROOT does not contain my_reward/judge_qwen.py, so the reward's log path cannot be derived: $PROJECT_ROOT" >&2
   exit 2
 fi
-if [ -f "$REWARD_LOG" ]; then
-  if ! REWARD_LOG_START_BYTES="$(wc -c < "$REWARD_LOG" | tr -d '[:space:]')"; then
-    echo "cannot size the reward log: $REWARD_LOG" >&2
-    exit 2
-  fi
-else
-  REWARD_LOG_START_BYTES=0
+REWARD_LOG="$PROJECT_ROOT/logs/judge_qwen3_8b.log"
+
+# ---------------------------------------------------------------------------
+# Precondition 3: the reward log's directory must exist and the file must be
+# writable BEFORE the trainer starts.
+#
+# `safe_log` swallows its own errors (`my_reward/judge_qwen.py:140-146`) and its
+# parent directory is otherwise created only by `get_tb_writer()`
+# (`:166-173`), which runs at the END of the first reward call. On a clean
+# checkout that loses the whole first step's BASE/PAIR_CHECK evidence silently,
+# and the verifier requires one reward block per step.
+# ---------------------------------------------------------------------------
+mkdir -p "$(dirname "$REWARD_LOG")"
+if ! touch "$REWARD_LOG"; then
+  echo "refusing to run: cannot create the reward log: $REWARD_LOG" >&2
+  exit 2
+fi
+if [ ! -r "$REWARD_LOG" ]; then
+  echo "refusing to run: reward log is not readable: $REWARD_LOG" >&2
+  exit 2
+fi
+if [ ! -w "$REWARD_LOG" ]; then
+  echo "refusing to run: reward log is not writable, so the run could not record its evidence: $REWARD_LOG" >&2
+  exit 2
+fi
+if ! REWARD_LOG_START_BYTES="$(wc -c < "$REWARD_LOG" | tr -d '[:space:]')"; then
+  echo "cannot size the reward log: $REWARD_LOG" >&2
+  exit 2
 fi
 
 # ---------------------------------------------------------------------------
