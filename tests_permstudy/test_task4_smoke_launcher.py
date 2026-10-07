@@ -188,7 +188,7 @@ def test_launcher_captures_train_log_and_keeps_running_in_the_foreground():
 def test_launcher_refuses_to_report_success_without_captured_train_log():
     """An unchecked `tee` failure would report a clean run with no evidence."""
     text = launcher_text()
-    assert re.search(r'if \[ ! -s "\$TASK4_RUN_DIR/train\.log" \]', text), (
+    assert re.search(r'\[ ! -s "\$TASK4_RUN_DIR/train\.log" \]', text), (
         "launcher must verify train.log was actually written before reporting success"
     )
     assert text.count("train.log") >= 3
@@ -205,9 +205,43 @@ def test_run_dir_reuse_guard_is_fail_closed():
     assert re.search(r'if ! entries="\$\(ls -A "\$TASK4_RUN_DIR"\)"', text), (
         "the emptiness probe must be checked, not silenced with `|| true`"
     )
-    guard = text[text.index("if [ -e \"$TASK4_RUN_DIR\" ]") : text.index("cd \"$PROJECT_ROOT\"")]
+    guard = text[text.index('if [ -e "$TASK4_RUN_DIR" ]') : text.index("RESOLVED_CONFIG_TMP=")]
     assert "2>/dev/null" not in guard, "the reuse guard must not swallow listing failures"
     assert guard.count("exit 2") >= 3, "refusal, non-directory and unlistable cases must all exit 2"
+
+
+def test_relative_runtime_paths_are_absolutised_before_any_check():
+    """A relative TASK4_RUN_DIR must not be validated against the caller's cwd.
+
+    Regression: the `cd "$PROJECT_ROOT"` used to sit after the guards but before every
+    write, so `TASK4_RUN_DIR=rel` was checked against the invocation directory and then
+    used under PROJECT_ROOT, letting prior evidence be overwritten.
+    """
+    text = launcher_text()
+    cd_index = text.index('cd "$PROJECT_ROOT"')
+    guard_index = text.index('if [ -e "$TASK4_RUN_DIR" ]')
+    assert cd_index < guard_index, "the launcher must cd before the run-dir guard"
+
+    for variable in ("TASK4_RUN_DIR", "REWARD_LOG"):
+        absolutise = re.search(
+            r'case "\$%s" in\n\s*/\*\) ;;\n\s*\*\) %s="\$PROJECT_ROOT/\$%s" ;;\nesac' % (variable, variable, variable),
+            text,
+        )
+        assert absolutise is not None, f"{variable} must be absolutised against PROJECT_ROOT"
+        assert text.index(absolutise.group(0)) < guard_index, (
+            f"{variable} must be absolutised before the guards"
+        )
+
+
+def test_tee_exit_status_is_checked():
+    """A tee that writes partial output and fails must not be reported as success."""
+    text = launcher_text()
+    assert 'pipeline_status=("${PIPESTATUS[@]}")' in text, (
+        "PIPESTATUS must be snapshotted in one step: reading ${PIPESTATUS[0]} first resets the "
+        "array and makes ${PIPESTATUS[1]} unbound under `set -u`"
+    )
+    assert 'TEE_STATUS=${pipeline_status[1]:-0}' in text
+    assert re.search(r'if \[ "\$TEE_STATUS" -ne 0 \]', text), "tee's own status must gate success"
 
 
 def test_reward_log_readability_is_a_precondition_not_a_mid_run_abort():
@@ -226,6 +260,7 @@ def test_run_dir_is_created_only_after_every_precondition():
     for precondition in (
         'if [ -e "$TASK4_RUN_DIR" ]',
         'if [ -e "$REWARD_LOG" ] && [ ! -r "$REWARD_LOG" ]',
+        'if ! REWARD_LOG_START_BYTES="$(wc -c < "$REWARD_LOG"',
         "RESOLVED_CONFIG_TMP=",
     ):
         assert text.index(precondition) < creation, f"{precondition} must run before the run dir exists"

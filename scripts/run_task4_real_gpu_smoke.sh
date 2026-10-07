@@ -5,8 +5,13 @@
 # This script is executed on the Linux GPU host (AutoDL). It never detaches:
 # it owns stdout/stderr capture and returns the trainer's exact exit code.
 #
-# Every precondition is checked BEFORE the run directory is created, so a failed
+# Every precondition -- including the reward-log sizing probe and the Hydra
+# composition -- is checked BEFORE the run directory is created, so a failed
 # precondition leaves no half-built run directory that would refuse a retry.
+# Runtime paths are absolutised against PROJECT_ROOT before any check, so a
+# relative TASK4_RUN_DIR / REWARD_LOG can never be validated in one directory
+# and used in another.
+#
 # Exit codes: 2 = precondition/capture failure, otherwise the trainer's status.
 #
 # Required environment:
@@ -29,6 +34,18 @@ set -euo pipefail
 
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 REWARD_LOG="${REWARD_LOG:-$PROJECT_ROOT/logs/judge_qwen3_8b.log}"
+
+# The trainer needs CWD = repository root, and every path below must mean the same thing
+# for the checks and for the writes, so normalise before anything else runs.
+cd "$PROJECT_ROOT"
+case "$TASK4_RUN_DIR" in
+  /*) ;;
+  *) TASK4_RUN_DIR="$PROJECT_ROOT/$TASK4_RUN_DIR" ;;
+esac
+case "$REWARD_LOG" in
+  /*) ;;
+  *) REWARD_LOG="$PROJECT_ROOT/$REWARD_LOG" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Precondition 1: the run directory must be absent, or prove itself empty.
@@ -53,16 +70,22 @@ if [ -e "$TASK4_RUN_DIR" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Precondition 2: the reward log must be windowable. Without a readable reward
-# log the run cannot produce its identity/reorder evidence, so this is decided
-# up front instead of aborting mid-way through evidence capture.
+# Precondition 2: the reward log must be readable AND sizeable. Without a readable
+# reward log the run cannot produce its identity/reorder evidence, so this is
+# decided up front instead of aborting mid-way through evidence capture.
 # ---------------------------------------------------------------------------
 if [ -e "$REWARD_LOG" ] && [ ! -r "$REWARD_LOG" ]; then
   echo "refusing to run: reward log exists but is not readable: $REWARD_LOG" >&2
   exit 2
 fi
-
-cd "$PROJECT_ROOT"
+if [ -f "$REWARD_LOG" ]; then
+  if ! REWARD_LOG_START_BYTES="$(wc -c < "$REWARD_LOG" | tr -d '[:space:]')"; then
+    echo "cannot size the reward log: $REWARD_LOG" >&2
+    exit 2
+  fi
+else
+  REWARD_LOG_START_BYTES=0
+fi
 
 # ---------------------------------------------------------------------------
 # Fixed smoke configuration. Every value here is part of the PASS contract.
@@ -159,18 +182,6 @@ mv "$RESOLVED_CONFIG_TMP" "$TASK4_RUN_DIR/resolved_config.yaml"
 export TENSORBOARD_DIR="$TASK4_RUN_DIR/tensorboard"
 mkdir -p "$TENSORBOARD_DIR"
 
-# ---------------------------------------------------------------------------
-# Window the persistent reward log BEFORE training starts. Only bytes appended
-# after this offset are admissible evidence for this run.
-# ---------------------------------------------------------------------------
-if [ -f "$REWARD_LOG" ]; then
-  if ! REWARD_LOG_START_BYTES="$(wc -c < "$REWARD_LOG" | tr -d '[:space:]')"; then
-    echo "cannot size the reward log: $REWARD_LOG" >&2
-    exit 2
-  fi
-else
-  REWARD_LOG_START_BYTES=0
-fi
 printf '{"reward_log_path": "%s", "start_offset_bytes": %s}\n' \
   "$REWARD_LOG" "$REWARD_LOG_START_BYTES" > "$TASK4_RUN_DIR/reward_log_window.json"
 
@@ -212,16 +223,22 @@ printf '%s\n' "$command_line" > "$TASK4_RUN_DIR/command.sh"
 # Run in the foreground, capture output, and preserve the trainer's exit code.
 # ---------------------------------------------------------------------------
 TRAINER_STATUS=0
+TEE_STATUS=0
 set +e
 set -o pipefail
 python -m verl.trainer.main_ppo "${TRAINER_OVERRIDES[@]}" 2>&1 | tee "$TASK4_RUN_DIR/train.log"
-TRAINER_STATUS=${PIPESTATUS[0]}
+# PIPESTATUS is reset by every subsequent simple command, so snapshot the whole array
+# immediately. Reading ${PIPESTATUS[0]} first would make ${PIPESTATUS[1]} unbound under
+# `set -u` and kill the script on every run, including a clean one.
+pipeline_status=("${PIPESTATUS[@]}")
 set -e
+TRAINER_STATUS=${pipeline_status[0]:-0}
+TEE_STATUS=${pipeline_status[1]:-0}
 
-# An unchecked tee failure would report a clean run with no captured evidence,
-# and train.log is a PASS-gating artifact.
-if [ ! -s "$TASK4_RUN_DIR/train.log" ]; then
-  echo "trainer output was not captured to ${TASK4_RUN_DIR}/train.log (trainer exit status was ${TRAINER_STATUS})" >&2
+# A partially written or missing train.log means the capture failed, and train.log
+# is a PASS-gating artifact: report that instead of the trainer's clean status.
+if [ "$TEE_STATUS" -ne 0 ] || [ ! -s "$TASK4_RUN_DIR/train.log" ]; then
+  echo "trainer output was not captured to ${TASK4_RUN_DIR}/train.log (trainer exit status was ${TRAINER_STATUS}, tee exit status was ${TEE_STATUS})" >&2
   exit 2
 fi
 
