@@ -611,13 +611,24 @@ python -m verl.model_merger merge \
   --target_dir "$TASK4_RUN_DIR/checkpoints/global_step_2/actor/hf"
 ```
 
-- [ ] **Step 2: Run the strict verifier**
+- [ ] **Step 2: Normalize the merged adapter config**
+
+`verl/model_merger/base_model_merger.py` writes `"lora_alpha": 0` into the merged PEFT config,
+while training uses `lora_rank=32` and `lora_alpha=64`. PEFT scales a LoRA update by `alpha / r`,
+so an uncorrected adapter would scale the trained delta by `0 / 32 = 0` and the controlled
+evaluation would not see the trained adapter. This step is mandatory and must run before the
+evaluation:
 
 ```bash
-python scripts_permstudy/task4/verify_real_gpu_smoke.py \
-  --run-dir "$TASK4_RUN_DIR" \
-  --dataset-manifest "$TASK4_RUN_DIR/dataset_manifest.json"
+python scripts_permstudy/task4/normalize_merged_adapter.py \
+  --adapter-dir "$TASK4_RUN_DIR/checkpoints/global_step_2/actor/hf/lora_adapter" \
+  --expected-rank 32 \
+  --expected-alpha 64
 ```
+
+It refuses a rank mismatch without rewriting anything, corrects `lora_alpha` to the training
+value, and records the before/after SHA256 of `adapter_config.json` in
+`adapter_normalization.json`.
 
 - [ ] **Step 3: Run minimal controlled evaluation**
 
@@ -637,9 +648,24 @@ python evaluation/evaluate_models.py \
   --max_new_tokens 256
 ```
 
-- [ ] **Step 4: Re-run the verifier with eval evidence**
+- [ ] **Step 4: Run the strict verifier once, after the evaluation exists**
 
-Require controlled metadata but no accuracy threshold.
+```bash
+python scripts_permstudy/task4/verify_real_gpu_smoke.py \
+  --run-dir "$TASK4_RUN_DIR" \
+  --dataset-manifest "$TASK4_RUN_DIR/dataset_manifest.json"
+```
+
+The verifier checks the merged adapter, the controlled-evaluation tree and the reward-log window
+together, and it requires `adapter_normalization.json` with an `after_sha256` matching the current
+`adapter_config.json`. It therefore cannot run before Step 3: with no `controlled_eval/**/summary.json`
+it fails with an evidence error. Require controlled metadata but no accuracy threshold.
+
+Execution order for this task is exactly:
+
+```text
+merge -> normalize_merged_adapter -> controlled evaluation -> final strict verifier
+```
 
 ### Task 6: Curate and review the compact evidence artifact
 
