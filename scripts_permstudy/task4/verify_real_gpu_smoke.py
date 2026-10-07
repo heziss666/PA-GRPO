@@ -53,10 +53,10 @@ PAIR_BASELINE_METRICS = (
 
 PER_STEP_METRICS = ("actor/pg_loss", "actor/grad_norm", "actor/kl_loss")
 
-# Only these keys may fail the run through a non-finite value. Scanning every `ident:number`
-# in the log would let an echoed prompt or response containing "x: nan" produce an
-# unexplained hard FAIL.
-FINITE_REQUIRED_METRICS = PER_STEP_METRICS + PAIR_BASELINE_METRICS
+# Every namespaced (`group/name`) numeric value in the log is a trainer metric and must be
+# finite. Restricting the check to a fixed list of keys let a NaN `critic/advantages` or
+# `reward/total` through, while scanning for bare `ident:number` made echoed prose such as a
+# response containing "x: nan" fail the run. The `/`-in-the-key rule separates the two.
 
 # Real vLLM runtime markers. The resolved-config echo printed by
 # `verl/trainer/main_ppo.py:253` contains `hybrid_engine`, `free_cache_engine` and
@@ -75,7 +75,10 @@ _METRIC_RE = re.compile(
 )
 _BASE_RE = re.compile(r"BASE \| i=(\d+) \| pair_id=(\S+?) \| perm=(\d+)")
 _UNPAIRED_RE = re.compile(r"PAIR_UNPAIRED \| pair_id=(\S+?) \| rollout_slot=(\d+)")
-_CHECK_RE = re.compile(r"PAIR_CHECK \| pair_id=(\S+?) \| rollout_slot=(\d+)")
+_CHECK_RE = re.compile(
+    r"PAIR_CHECK \| pair_id=(\S+?) \| rollout_slot=(\d+) \| "
+    r"i0=(\d+),idx0=(\d+),[^|]*\| i1=(\d+),idx1=(\d+),"
+)
 # The log line prefix is "... | idx=<source index> | pid=... |"; note that PAIR_CHECK
 # lines carry "idx0=" / "idx1=", which this pattern deliberately does not match.
 _IDX_RE = re.compile(r"\bidx=(\d+)\b")
@@ -153,9 +156,7 @@ def parse_train_log(text: str) -> dict[str, Any]:
                 number = float(raw)
             except ValueError:
                 continue
-            if key in FINITE_REQUIRED_METRICS and (
-                lowered in {"nan", "inf", "-inf"} or not math.isfinite(number)
-            ):
+            if "/" in key and (lowered in {"nan", "inf", "-inf"} or not math.isfinite(number)):
                 nan_or_inf.append(f"{key}={raw}")
             values[key] = number
 
@@ -237,7 +238,9 @@ def _reward_blocks(lines: Sequence[str]) -> list[dict[str, list[Any]]]:
             continue
         check = _CHECK_RE.search(line)
         if check:
-            ensure()["checks"].append((check.group(1), int(check.group(2))))
+            ensure()["checks"].append(
+                (check.group(1), int(check.group(2)), int(check.group(4)), int(check.group(6)))
+            )
 
     if current is not None and any(current.values()):
         blocks.append(current)
@@ -251,6 +254,8 @@ def canonical_placement_sequence(dataset_manifest: Mapping[str, Any]) -> list[tu
         raise EvidenceError("dataset manifest has no pairs")
     sequence: list[tuple[str, int]] = []
     for pair in pairs:
+        if not isinstance(pair, Mapping):
+            raise EvidenceError("dataset manifest pair entries must be objects")
         pair_id = pair.get("pair_id")
         rows = pair.get("rows")
         if not isinstance(pair_id, str) or not isinstance(rows, list) or len(rows) != 2:
@@ -270,6 +275,8 @@ def canonical_source_index_sequence(dataset_manifest: Mapping[str, Any]) -> list
         raise EvidenceError("dataset manifest has no pairs")
     sequence: list[int] = []
     for pair in pairs:
+        if not isinstance(pair, Mapping):
+            raise EvidenceError("dataset manifest pair entries must be objects")
         rows = pair.get("rows")
         if not isinstance(rows, list) or len(rows) != 2:
             raise EvidenceError("dataset manifest pair entries must carry pair_id and two rows")
@@ -293,8 +300,25 @@ def analyse_identity(
     expected_keys = set(canonical)
     blocks = _reward_blocks(window_lines)
 
+    # source row index -> (pair_id, permutation), so a PAIR_CHECK's idx0/idx1 can be proved to
+    # actually join the two permutations of the pair it names.
+    row_lookup: dict[int, tuple[str, int]] = {}
+    for pair in dataset_manifest.get("pairs") or []:
+        if not isinstance(pair, Mapping):
+            raise EvidenceError("dataset manifest pair entries must be objects")
+        pair_id = pair.get("pair_id")
+        rows = pair.get("rows")
+        if not isinstance(pair_id, str) or not isinstance(rows, list) or len(rows) != 2:
+            raise EvidenceError("dataset manifest pair entries must carry pair_id and two rows")
+        for row in rows:
+            row_index = row.get("row_index")
+            if not isinstance(row_index, int) or isinstance(row_index, bool):
+                raise EvidenceError(f"dataset manifest row for pair {pair_id} has no integer row_index")
+            row_lookup[row_index] = (pair_id, int(row["permutation"]))
+
     unpaired_count = 0
     duplicate_keys = 0
+    bad_joins: list[str] = []
     placement_reordered = False
     source_index_reordered = False
     source_indices_usable = bool(blocks)
@@ -305,10 +329,25 @@ def analyse_identity(
         observed = [(pair_id, permutation) for _, pair_id, permutation, _ in ordered]
         observed_sources = [source for *_, source in ordered]
         checks = block["checks"]
-        check_keys = list(checks)
+        check_keys = [(pair_id, slot) for pair_id, slot, _, _ in checks]
         duplicates = len(check_keys) - len(set(check_keys))
         duplicate_keys += duplicates
         unpaired_count += len(block["unpaired"])
+
+        block_bad_joins: list[str] = []
+        for pair_id, slot, idx0, idx1 in checks:
+            first = row_lookup.get(idx0)
+            second = row_lookup.get(idx1)
+            joined = (
+                first is not None
+                and second is not None
+                and first[0] == pair_id
+                and second[0] == pair_id
+                and {first[1], second[1]} == {0, 1}
+            )
+            if not joined:
+                block_bad_joins.append(f"{pair_id}#{slot}")
+        bad_joins.extend(block_bad_joins)
 
         # The source-index channel is only admissible when the logged indices are
         # exactly the fixture's own row indices. If the fixture dropped
@@ -337,6 +376,7 @@ def analyse_identity(
                 "placement_reordered": block_placement_reordered,
                 "source_indices_usable": block_usable,
                 "source_index_reordered": block_source_reordered,
+                "bad_pair_joins": block_bad_joins,
             }
         )
 
@@ -354,6 +394,7 @@ def analyse_identity(
         "source_index_reordered": source_index_reordered,
         "source_indices_usable": source_indices_usable,
         "canonical_placement_count": len(canonical),
+        "bad_pair_joins": bad_joins,
         "blocks": per_block,
     }
 
@@ -432,7 +473,8 @@ def _read_adapter_arrays(adapter_path: Path) -> dict[str, np.ndarray]:
         except Exception as exc:  # noqa: BLE001 - try the next framework, then report
             last_error = exc
     raise EvidenceError(
-        f"cannot read LoRA adapter {adapter_path.name}: {type(last_error).__name__}"
+        f"cannot read LoRA adapter {adapter_path.name}: "
+        f"{type(last_error).__name__}: {str(last_error)[:120]}"
     )
 
 
@@ -454,7 +496,11 @@ def inspect_lora(adapter_candidates: Sequence[Path]) -> dict[str, Any]:
     return {
         "adapter": adapter_path.name,
         "adapter_path": str(adapter_path),
-        "adapter_source": "merger_output" if adapter_path == adapter_candidates[0] else "trainer_checkpoint",
+        "adapter_source": (
+            "explicit"
+            if len(adapter_candidates) == 1
+            else ("merger_output" if adapter_path == adapter_candidates[0] else "trainer_checkpoint")
+        ),
         "tensor_count": len(arrays),
         "lora_b_tensor_count": len(lora_b_names),
         "lora_b_tensors": lora_b_names,
@@ -507,7 +553,7 @@ def inspect_controlled_eval(
             total_samples += samples
 
     return {
-        "summary_files": [path.name for path in summary_files],
+        "summary_files": [str(path.relative_to(eval_dir)) for path in summary_files],
         "datasets": datasets,
         "evaluation_contracts": sorted(contracts),
         "num_options_values": sorted(option_counts),
@@ -583,6 +629,22 @@ def verify_real_gpu_smoke(
     if Path(recorded_log).resolve() != Path(reward_path).resolve():
         raise EvidenceError(
             "reward log window path does not match the path the launcher recorded in environment.txt"
+        )
+    # A rotated or replaced log keeps the same path but presents a different window, so the
+    # offset the launcher recorded must still equal the offset the window claims.
+    recorded_offsets = [
+        line.split("=", 1)[1]
+        for line in environment_text.splitlines()
+        if line.startswith("reward_log_start_offset_bytes=")
+    ]
+    if not recorded_offsets:
+        raise EvidenceError("environment.txt does not record the reward log start offset")
+    if _as_int(recorded_offsets[0], what="recorded reward_log_start_offset_bytes") != _as_int(
+        window_meta.get("start_offset_bytes"), what="window start_offset_bytes"
+    ):
+        raise EvidenceError(
+            "reward log window start offset does not match the offset the launcher recorded, "
+            "so the log was rotated or replaced"
         )
 
     rollouts = inspect_rollouts(paths.rollout_dir, expected_steps)
@@ -661,6 +723,11 @@ def verify_real_gpu_smoke(
             )
         if block["missing_check_keys"]:
             failures.append(f"reward block {index}: unpaired rollout keys {block['missing_check_keys'][:4]}")
+    if identity["bad_pair_joins"]:
+        failures.append(
+            f"{len(identity['bad_pair_joins'])} PAIR_CHECK record(s) do not join permutations 0 and 1 of "
+            f"the pair they name: {identity['bad_pair_joins'][:4]}"
+        )
     if not identity["source_indices_usable"]:
         failures.append(
             "reward log source indices do not match the dataset manifest row indices, so the reorder evidence "

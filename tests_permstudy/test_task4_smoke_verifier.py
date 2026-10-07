@@ -132,6 +132,7 @@ def write_reward_log(
     duplicate: bool = False,
     blocks: int = 2,
     batch_position_indices: bool = False,
+    bad_join: bool = False,
 ) -> None:
     path = run_dir / "reward.log"
     # historical evidence that must never be admissible
@@ -165,12 +166,18 @@ def write_reward_log(
                 )
             )
         checks = []
-        for pair_id in pair_ids:
+        for pair in manifest["pairs"]:
+            pair_id = pair["pair_id"]
+            rows_by_permutation = {int(row["permutation"]): int(row["row_index"]) for row in pair["rows"]}
+            join0, join1 = rows_by_permutation[0], rows_by_permutation[1]
+            if bad_join and pair_id == manifest["pairs"][0]["pair_id"]:
+                join1 = join0  # joins permutation 0 with itself
             for slot in (0, 1):
                 checks.append(
                     _log_line(
                         f"PAIR_CHECK | pair_id={pair_id} | rollout_slot={slot} | "
-                        f"i0=0,idx0=0,ans0=A,conf0=1.00 | i1=1,idx1=1,ans1=A,conf1=1.00 | "
+                        f"i0={join0},idx0={join0},ans0=A,conf0=1.00 | "
+                        f"i1={join1},idx1={join1},ans1=A,conf1=1.00 | "
                         f"mapped(ans0)=A | is_consistent=True | pair_bonus=1.000 | "
                         f"final_score0=1.000 | final_score1=1.000"
                     )
@@ -298,6 +305,7 @@ def build_run(tmp_path: Path, **overrides):
             duplicate=overrides.get("duplicate", False),
             blocks=overrides.get("reward_blocks", 2),
             batch_position_indices=overrides.get("batch_position_indices", False),
+            bad_join=overrides.get("bad_join", False),
         )
     else:
         (run_dir / "reward_log_window.json").write_text(
@@ -307,8 +315,11 @@ def build_run(tmp_path: Path, **overrides):
     # the launcher always records the reward log it windowed, and the verifier cross-checks it
     window = json.loads((run_dir / "reward_log_window.json").read_text(encoding="utf-8"))
     reward_log_recorded = overrides.get("environment_reward_log", window["reward_log_path"])
+    offset_recorded = overrides.get("environment_start_offset", window["start_offset_bytes"])
     (run_dir / "environment.txt").write_text(
-        f"task4_run_id=probe\nreward_log={reward_log_recorded}\n", encoding="utf-8"
+        f"task4_run_id=probe\nreward_log={reward_log_recorded}\n"
+        f"reward_log_start_offset_bytes={offset_recorded}\n",
+        encoding="utf-8",
     )
     write_checkpoints(
         run_dir,
@@ -418,6 +429,48 @@ def test_duplicate_rollout_key_fails(tmp_path):
     verifier = load_verifier()
     run_dir = build_run(tmp_path, duplicate=True)
     with pytest.raises(verifier.VerificationFailed, match="duplicate PAIR_CHECK"):
+        verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+
+
+def test_pair_check_that_does_not_join_the_two_permutations_fails(tmp_path):
+    """Plan §3.2 wants a PAIR_CHECK that actually joins permutation 0 with 1."""
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path, bad_join=True)
+    with pytest.raises(verifier.VerificationFailed, match="do not join permutations 0 and 1"):
+        verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+
+
+def test_non_finite_in_any_namespaced_metric_fails(tmp_path):
+    """A NaN in any `group/name` metric must fail, not only the named ones."""
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path)
+    with (run_dir / "train.log").open("a", encoding="utf-8") as handle:
+        handle.write("step:2 - critic/advantages:nan - reward/total:inf\n")
+    with pytest.raises(verifier.VerificationFailed, match="non-finite metric"):
+        verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+
+
+def test_rotated_reward_log_offset_mismatch_is_rejected(tmp_path):
+    """A replacement log with the same path but a different window is caught."""
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path, environment_start_offset=0)
+    with pytest.raises(verifier.EvidenceError, match="rotated or replaced"):
+        verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+
+
+def test_malformed_manifest_pair_entry_is_a_contract_error(tmp_path):
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path)
+    (run_dir / "dataset_manifest.json").write_text(json.dumps({"pairs": [1, 2]}), encoding="utf-8")
+    with pytest.raises(verifier.EvidenceError, match="pair entries must be objects"):
+        verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+
+
+def test_batch_position_indices_are_rejected_as_vacuous_reorder_evidence(tmp_path):
+    """A fixture without `extra_info.index` logs batch positions, so the gate must fail closed."""
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path, batch_position_indices=True)
+    with pytest.raises(verifier.VerificationFailed, match="vacuous"):
         verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
 
 
