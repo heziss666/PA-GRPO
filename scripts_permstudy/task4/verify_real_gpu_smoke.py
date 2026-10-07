@@ -72,6 +72,11 @@ VLLM_RUNTIME_MARKERS = (
     "Loading model weights took",
     "vLLM API server",
     "Starting vLLM",
+    # With VLLM_LOGGING_LEVEL=WARN the INFO-level startup markers above
+    # are suppressed. This string is emitted only after a real vLLM
+    # GPU worker object has been constructed, so it is valid runtime
+    # evidence and cannot be satisfied by the resolved-config echo.
+    "vllm.v1.worker.gpu_worker.Worker",
 )
 
 _METRIC_RE = re.compile(
