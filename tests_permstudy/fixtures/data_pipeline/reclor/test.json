@@ -1,0 +1,28 @@
+[
+  {
+    "id_string": "synthetic-test-001",
+    "context": "Synthetic test scenario one: this row must never become a training record.",
+    "question": "Which synthetic test statement holds?",
+    "answers": [
+      "Test choice A",
+      "Test choice B",
+      "Test choice C",
+      "Test choice D"
+    ],
+    "label": 1,
+    "synthetic": true
+  },
+  {
+    "id_string": "synthetic-test-002",
+    "context": "Synthetic test scenario two: this row must never become a training record.",
+    "question": "Which synthetic test option remains?",
+    "answers": [
+      "Final choice A",
+      "Final choice B",
+      "Final choice C",
+      "Final choice D"
+    ],
+    "label": 3,
+    "synthetic": true
+  }
+]

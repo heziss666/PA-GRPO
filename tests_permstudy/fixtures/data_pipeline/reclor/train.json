@@ -1,0 +1,67 @@
+[
+  {
+    "id_string": "synthetic-train-001",
+    "context": "Synthetic scenario one: a laboratory keeps four labelled samples in a single row.",
+    "question": "Which sample is leftmost?",
+    "answers": [
+      "Sample A",
+      "Sample B",
+      "Sample C",
+      "Sample D"
+    ],
+    "label": 0,
+    "synthetic": true
+  },
+  {
+    "id_string": "synthetic-train-002",
+    "context": "Synthetic scenario two: this content repeats so source-local deduplication is exercised.",
+    "question": "Which synthetic option is selected?",
+    "answers": [
+      "First synthetic option",
+      "Second synthetic option",
+      "Third synthetic option",
+      "Fourth synthetic option"
+    ],
+    "label": 1,
+    "synthetic": true
+  },
+  {
+    "id_string": "synthetic-train-003",
+    "context": "Synthetic scenario three: line endings are exercised here.\r\nA second synthetic line follows.",
+    "question": "Which synthetic statement follows?",
+    "answers": [
+      "Alpha choice",
+      "Beta choice",
+      "Gamma choice",
+      "Delta choice"
+    ],
+    "label": 2,
+    "synthetic": true
+  },
+  {
+    "id_string": "synthetic-train-004",
+    "context": "Synthetic scenario four: interior spacing is preserved here.\r\n\r\nA third synthetic line keeps  double  spaces.",
+    "question": "Which synthetic conclusion holds?   ",
+    "answers": [
+      "One conclusion",
+      "Two conclusion",
+      "Three conclusion",
+      "Four conclusion"
+    ],
+    "label": 3,
+    "synthetic": true
+  },
+  {
+    "id_string": "synthetic-train-005",
+    "context": "Synthetic scenario two: this content repeats so source-local deduplication is exercised.",
+    "question": "Which synthetic option is selected?",
+    "answers": [
+      "First synthetic option",
+      "Second synthetic option",
+      "Third synthetic option",
+      "Fourth synthetic option"
+    ],
+    "label": 1,
+    "synthetic": true
+  }
+]
