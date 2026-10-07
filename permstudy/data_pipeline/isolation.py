@@ -54,6 +54,8 @@ _SAFE_CODE = re.compile(r"[A-Za-z0-9_.\-]+\Z")
 _SAFE_REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]*/[A-Za-z0-9][A-Za-z0-9_.\-]*\Z")
 _EMBEDDED_PATH = re.compile(r"//|(?:^|[=,(@])/")
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
+# Exact dependency-name exception, only at package_versions' immediate level.
+_SAFE_PACKAGE_KEYS = frozenset({"tokenizers"})
 
 
 def resolve_path(path: Path) -> Path:
@@ -79,6 +81,8 @@ def _effective_caches(env: Mapping[str, str]) -> dict[str, Path]:
     # datasets 4.4.1 expands only '~', unlike huggingface_hub's HF_HOME.
     datasets_base = os.path.join(env.get("XDG_CACHE_HOME", "~/.cache"), "huggingface")
     datasets_home = Path(os.path.expanduser(env.get("HF_HOME", datasets_base)))
+    datasets_cache = Path(env.get("HF_DATASETS_CACHE", str(datasets_home / "datasets")))
+    default_downloads = datasets_cache / "downloads"
     hub = _cache_path(env.get("HF_HUB_CACHE", env.get("HUGGINGFACE_HUB_CACHE", str(hf_home / "hub"))))
     assets = _cache_path(env.get("HF_ASSETS_CACHE", env.get("HUGGINGFACE_ASSETS_CACHE", str(hf_home / "assets"))))
     legacy_bert = env.get("PYTORCH_PRETRAINED_BERT_CACHE", str(hub))
@@ -87,7 +91,12 @@ def _effective_caches(env: Mapping[str, str]) -> dict[str, Path]:
         "HF_HOME": hf_home,
         "HUGGINGFACE_HUB_CACHE": hub,
         "TRANSFORMERS_CACHE": Path(env.get("TRANSFORMERS_CACHE", legacy_transformers)),
-        "HF_DATASETS_CACHE": Path(env.get("HF_DATASETS_CACHE", str(datasets_home / "datasets"))),
+        "HF_DATASETS_CACHE": datasets_cache,
+        "HF_MODULES_CACHE": Path(env.get("HF_MODULES_CACHE", str(datasets_home / "modules"))),
+        "HF_DATASETS_DOWNLOADED_DATASETS_PATH": Path(env.get("HF_DATASETS_DOWNLOADED_DATASETS_PATH", str(default_downloads))),
+        # Pinned datasets derives extraction from default downloads, even when
+        # HF_DATASETS_DOWNLOADED_DATASETS_PATH redirects download storage.
+        "HF_DATASETS_EXTRACTED_DATASETS_PATH": Path(env.get("HF_DATASETS_EXTRACTED_DATASETS_PATH", str(default_downloads / "extracted"))),
         "HF_ASSETS_CACHE": assets,
         # The pinned hub expands home/hub/assets, but keeps Xet overrides literal.
         "HF_XET_CACHE": Path(env.get("HF_XET_CACHE", str(hf_home / "xet"))),
@@ -177,11 +186,11 @@ def safe_log_fields(fields: Mapping[str, object]) -> dict[str, object]:
     return result
 
 
-def _nested(value: object, kind: str = "scalar", *, repository_keys: bool = False, repository_value: bool = False) -> object:
+def _nested(value: object, kind: str = "scalar", *, repository_keys: bool = False, repository_value: bool = False, safe_keys: frozenset[str] = frozenset()) -> object:
     if isinstance(value, Mapping):
         result = {}
         for key, item in value.items():
-            if not _safe_string(key, repository=repository_keys) or any(word in key.lower() for word in _SENSITIVE_WORDS):
+            if not _safe_string(key, repository=repository_keys) or (key not in safe_keys and any(word in key.lower() for word in _SENSITIVE_WORDS)):
                 raise SafeLoggingError("public manifest contains unsafe nested fields")
             result[key] = _nested(item, kind)
         return result
@@ -227,5 +236,8 @@ def sanitize_public_manifest(payload: Mapping[str, object]) -> dict[str, object]
             raise SafeLoggingError("public manifest contains unsafe count values")
         if key.endswith(("_hash", "_sha256")) and not (isinstance(value, str) and _HASH.fullmatch(value)):
             raise SafeLoggingError("public manifest contains unsafe hash values")
-        result[key] = _nested(value, kind, repository_keys=key == "source_revisions", repository_value=repository_value)
+        result[key] = _nested(
+            value, kind, repository_keys=key == "source_revisions", repository_value=repository_value,
+            safe_keys=_SAFE_PACKAGE_KEYS if key == "package_versions" else frozenset(),
+        )
     return result

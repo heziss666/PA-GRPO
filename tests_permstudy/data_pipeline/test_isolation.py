@@ -252,6 +252,84 @@ def test_explicit_datasets_override_remains_literal(tmp_path, monkeypatch):
         isolation.validate_external_roots(repo, tmp_path / "data", env)
 
 
+@pytest.mark.parametrize("kind", ["HF_MODULES_CACHE", "HF_DATASETS_DOWNLOADED_DATASETS_PATH", "HF_DATASETS_EXTRACTED_DATASETS_PATH"])
+def test_all_datasets_effective_path_overrides_inside_repo_are_rejected(tmp_path, kind):
+    isolation = load_isolation()
+    env = external_env(tmp_path)
+    env[kind] = str(tmp_path / "repo" / "cache")
+    with pytest.raises(isolation.IsolationError, match="cache"):
+        isolation.validate_external_roots(tmp_path / "repo", tmp_path / "data", env)
+
+
+@pytest.mark.parametrize("kind", ["HF_MODULES_CACHE", "HF_DATASETS_DOWNLOADED_DATASETS_PATH", "HF_DATASETS_EXTRACTED_DATASETS_PATH"])
+def test_all_datasets_path_overrides_keep_variable_syntax_literal(tmp_path, monkeypatch, kind):
+    isolation = load_isolation()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("PAGRPO_REVIEW_EXTERNAL", str(tmp_path / "external"))
+    env = external_env(tmp_path)
+    env[kind] = "$PAGRPO_REVIEW_EXTERNAL/cache"
+    with pytest.raises(isolation.IsolationError, match="cache"):
+        isolation.validate_external_roots(repo, tmp_path / "data", env)
+
+
+@pytest.mark.parametrize("cache_shape", ["modules", "downloads", "extracted"])
+def test_datasets_default_paths_resolve_repository_aliases(tmp_path, cache_shape):
+    isolation = load_isolation()
+    repo, cache = tmp_path / "repo", tmp_path / "cache"
+    repo.mkdir()
+    relative = {"modules": "modules", "downloads": "datasets/downloads", "extracted": "datasets/downloads/extracted"}[cache_shape]
+    alias = cache / relative
+    alias.parent.mkdir(parents=True)
+    if os.name == "nt":
+        created = subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(repo)], capture_output=True)
+        if created.returncode:
+            pytest.skip("OS does not permit junctions")
+    else:
+        alias.symlink_to(repo, target_is_directory=True)
+    with pytest.raises(isolation.IsolationError, match="cache"):
+        isolation.validate_external_roots(repo, tmp_path / "data", external_env(tmp_path))
+
+
+def test_datasets_extracted_default_follows_default_downloads_not_override(tmp_path):
+    isolation = load_isolation()
+    # In pinned datasets, extracted defaults from HF_DATASETS_CACHE/downloads,
+    # even when downloaded datasets are redirected to a different external root.
+    env = external_env(tmp_path)
+    env["HF_DATASETS_DOWNLOADED_DATASETS_PATH"] = str(tmp_path / "other-downloads")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    alias = tmp_path / "cache" / "datasets" / "downloads" / "extracted"
+    alias.parent.mkdir(parents=True)
+    if os.name == "nt":
+        created = subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(repo)], capture_output=True)
+        if created.returncode:
+            pytest.skip("OS does not permit junctions")
+    else:
+        alias.symlink_to(repo, target_is_directory=True)
+    with pytest.raises(isolation.IsolationError, match="cache"):
+        isolation.validate_external_roots(repo, tmp_path / "data", env)
+
+
+def test_pinned_tokenizers_version_is_approved_public_evidence():
+    isolation = load_isolation()
+    evidence = {"package_versions": {"tokenizers": "0.22.1", "torch": "2.5.1"}}
+    assert isolation.sanitize_public_manifest(evidence) == evidence
+
+
+@pytest.mark.parametrize("payload", [
+    {"aggregate_statistics": {"tokenizers": "secret"}},
+    {"package_versions": {"LLMRESPONSE": "0.22.1"}},
+    {"package_versions": {"tokenizers": {"response": "secret"}}},
+    {"package_versions": {"torch": {"tokenizers": "secret"}}},
+])
+def test_package_name_exception_does_not_escape_its_namespace(payload):
+    isolation = load_isolation()
+    with pytest.raises(isolation.SafeLoggingError):
+        isolation.sanitize_public_manifest(payload)
+
+
 @pytest.mark.parametrize("fields", [
     {"response": "synthetic secret"}, {"HF_TOKEN": "hf_syntheticsecret"},
     {"candidate_id": "/private/secret"}, {"candidate_id": "C:\\private\\secret"},
