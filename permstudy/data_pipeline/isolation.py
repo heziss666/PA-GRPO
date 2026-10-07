@@ -75,6 +75,15 @@ def _contains(parent: str, child: str) -> bool:
         return False
 
 
+def _mutually_contained(first: str, second: str) -> bool:
+    """Whether either already-normalized path contains the other, in either direction.
+
+    Both public containment checks below route through this one predicate, so the
+    either-direction rule cannot drift between a data root and a non-root path.
+    """
+    return _contains(first, second) or _contains(second, first)
+
+
 def _effective_caches(env: Mapping[str, str]) -> dict[str, Path]:
     cache_base = Path(env.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
     hf_home = _cache_path(env.get("HF_HOME", str(cache_base / "huggingface")))
@@ -122,10 +131,23 @@ def _cache_path(value: str) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(value)))
 
 
+def validate_external_to_repository(repo_root: Path, path: Path) -> None:
+    """Fail unless ``path`` and the repository have no containment relationship.
+
+    This is the same either-direction rule ``validate_external_roots`` applies to
+    a data root, for inputs that must stay outside the repository without being a
+    data root, such as an extracted source directory. Alias resolution, case
+    folding, separate-drive handling, and the containment predicate are the
+    shared primitives above, so the two checks cannot disagree.
+    """
+    if _mutually_contained(_normalized(repo_root), _normalized(path)):
+        raise IsolationError("repository and external path must not contain one another")
+
+
 def validate_external_roots(repo_root: Path, data_root: Path, env: Mapping[str, str]) -> IsolationReport:
     """Validate roots and effective HF caches without exposing runtime paths."""
     repo, data = _normalized(repo_root), _normalized(data_root)
-    if _contains(repo, data) or _contains(data, repo):
+    if _mutually_contained(repo, data):
         raise IsolationError("repository and data roots must not contain one another")
     caches = _effective_caches(env)
     if any(_contains(repo, _normalized(path)) for path in caches.values()):

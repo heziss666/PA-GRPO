@@ -31,6 +31,59 @@ def test_rejects_resolved_root_containment(tmp_path, relationship):
         isolation.validate_external_roots(repo, data, external_env(tmp_path))
 
 
+@pytest.mark.parametrize("relationship", ["child", "parent", "equal", "dotdot"])
+def test_rejects_resolved_containment_for_a_non_root_path(tmp_path, relationship):
+    isolation = load_isolation()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    candidate = {"child": repo / "private", "parent": tmp_path,
+                 "equal": repo, "dotdot": repo / "other" / ".." / "private"}[relationship]
+    with pytest.raises(isolation.IsolationError, match="must not contain one another"):
+        isolation.validate_external_to_repository(repo, candidate)
+
+
+def test_external_path_check_accepts_unrelated_paths_and_returns_nothing(tmp_path):
+    isolation = load_isolation()
+    assert isolation.validate_external_to_repository(tmp_path / "repo", tmp_path / "external") is None
+
+
+def test_external_path_and_root_checks_apply_one_containment_rule(tmp_path):
+    """Both public checks must agree, so neither can drift from the other."""
+    isolation = load_isolation()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = external_env(tmp_path)
+    for candidate in (repo / "inside", tmp_path, repo, repo / "other" / ".." / "private"):
+        with pytest.raises(isolation.IsolationError, match="must not contain one another"):
+            isolation.validate_external_to_repository(repo, candidate)
+        with pytest.raises(isolation.IsolationError, match="must not contain one another"):
+            isolation.validate_external_roots(repo, candidate, env)
+    unrelated = tmp_path / "external-data"
+    assert isolation.validate_external_to_repository(repo, unrelated) is None
+    assert isolation.validate_external_roots(repo, unrelated, env).data_root_hash
+
+
+def test_external_path_check_never_exposes_the_path(tmp_path):
+    isolation = load_isolation()
+    repo = tmp_path / "synthetic-repo-root"
+    with pytest.raises(isolation.IsolationError) as error:
+        isolation.validate_external_to_repository(repo, repo / "synthetic-source-directory")
+    assert str(tmp_path) not in str(error.value)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction behavior")
+def test_external_path_check_resolves_junction_aliases(tmp_path):
+    isolation = load_isolation()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    alias = tmp_path / "junction"
+    created = subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(repo)], capture_output=True)
+    if created.returncode:
+        pytest.skip("OS does not permit junctions")
+    with pytest.raises(isolation.IsolationError, match="must not contain one another"):
+        isolation.validate_external_to_repository(repo, alias / "private")
+
+
 def test_report_exposes_only_normalized_root_hashes_and_cache_kinds(tmp_path):
     isolation = load_isolation()
     repo, data = tmp_path / "repo", tmp_path / "data"

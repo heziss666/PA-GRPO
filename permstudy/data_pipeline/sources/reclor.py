@@ -31,7 +31,7 @@ import permstudy
 from ..canonical import canonical_json_bytes, normalize_text_v1, sha256_hex
 from .. import ids
 from ..io import IntegrityError, append_record, scan_jsonl, verify_artifact_ref, write_atomic_manifest
-from ..isolation import validate_external_roots
+from ..isolation import validate_external_roots, validate_external_to_repository
 from ..schema import ArtifactRef, QuestionRecord, Source
 from . import QUESTION_RECORD_SCHEMA_VERSION, SourceSnapshot
 
@@ -96,7 +96,8 @@ def load_reclor_train(source_path, data_root, *, acknowledge_noncommercial: bool
     ReClor is restricted to non-commercial research use, and a package caller
     must not be able to reach the source without that acknowledgement.
 
-    Isolation is validated first, so a data root inside the repository or an
+    Isolation is validated first: the extracted source directory and the data
+    root must both stay outside the repository, and an in-repository path or an
     effective Hugging Face cache inside the repository fails before the source is
     read and before anything is written. Validation, test, and use-item files are
     hashed but never parsed into questions.
@@ -104,10 +105,14 @@ def load_reclor_train(source_path, data_root, *, acknowledge_noncommercial: bool
     if acknowledge_noncommercial is not True:
         raise ReclorContractError(_ACKNOWLEDGEMENT_ERROR)
     source_directory = Path(source_path)
+    data_root = Path(data_root)
+    repository = repository_root()
+    # The source check precedes the directory check so a path inside the
+    # repository is rejected as an isolation violation whatever it holds.
+    validate_external_to_repository(repository, source_directory)
     if not source_directory.is_dir():
         raise ReclorContractError("source_path must be an extracted ReClor directory")
-    data_root = Path(data_root)
-    validate_external_roots(repository_root(), data_root, os.environ)
+    validate_external_roots(repository, data_root, os.environ)
 
     tree_manifest, file_hashes, snapshot_id = _tree_manifest(source_directory)
     rows = _validated_rows(source_directory / OFFICIAL_TRAIN_FILE)
@@ -167,7 +172,7 @@ def _acquisition_config(snapshot_id: str) -> dict[str, object]:
 
     The configuration is deliberately machine-independent: the source directory
     path must never reach a manifest, and a path-free configuration keeps the
-    manifest payload — and therefore ``output_manifest_hash`` — reproducible
+    manifest payload (and therefore ``output_manifest_hash``) reproducible
     across Windows and WSL.
     """
     return {

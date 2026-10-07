@@ -1,15 +1,21 @@
 """Focused tests for explicit ReClor acquisition and source-local deduplication.
 
-Every value used here is explicitly synthetic. The committed fixture directory
-is the only tree of official-shaped files these tests read, and derived trees
-are deterministic copies written below ``tmp_path``.
+Every value used here is explicitly synthetic. The tracked fixture directory is
+the only tree of official-shaped files these tests read, but the acquisition
+stage accepts only a source directory external to the repository, so the suite's
+canonical source tree is a byte-identical copy outside the repository and
+derived trees are further deterministic copies written below ``tmp_path``.
 """
 
+import atexit
 import dataclasses
 import json
+import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
+import tempfile
 
 import pytest
 
@@ -18,7 +24,15 @@ from permstudy.data_pipeline.schema import ArtifactRef, QuestionRecord, RunManif
 from permstudy.data_pipeline.sources import SourceSnapshot, reclor
 
 
-FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "data_pipeline" / "reclor"
+# The tracked synthetic fixtures, used only for byte-level assertions about what
+# Git actually contains and for the in-repository rejection cases.
+COMMITTED_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "data_pipeline" / "reclor"
+# The loader rejects a source directory inside the repository, so every positive
+# test reads this external byte-identical copy of the tracked tree.
+_EXTERNAL_FIXTURE_ROOT = Path(tempfile.mkdtemp(prefix="reclor-external-source-"))
+FIXTURE_DIR = _EXTERNAL_FIXTURE_ROOT / "reclor"
+shutil.copytree(COMMITTED_FIXTURES, FIXTURE_DIR)
+atexit.register(shutil.rmtree, _EXTERNAL_FIXTURE_ROOT, ignore_errors=True)
 OFFICIAL_FILES = ("test.json", "train.json", "use_items.txt", "val.json")
 TRAIN_IDS = (
     "synthetic-train-001",
@@ -245,19 +259,25 @@ def test_invalid_training_rows_are_rejected_without_writing(tmp_path, mutate):
 # --- snapshot integrity over all four official files -------------------------
 
 
+def test_external_source_copy_matches_the_tracked_fixture_bytes():
+    """The positive tests must read exactly the bytes Git contains."""
+    for name in OFFICIAL_FILES:
+        assert (FIXTURE_DIR / name).read_bytes() == (COMMITTED_FIXTURES / name).read_bytes()
+
+
 def test_private_manifest_hashes_exactly_the_four_official_files(tmp_path):
     snapshot = load(FIXTURE_DIR, tmp_path / "external")
     manifest = snapshot.private_manifest
     assert set(manifest["source_file_hashes"]) == set(OFFICIAL_FILES)
     for name in OFFICIAL_FILES:
-        expected = canonical.sha256_hex((FIXTURE_DIR / name).read_bytes())
+        expected = canonical.sha256_hex((COMMITTED_FIXTURES / name).read_bytes())
         assert manifest["source_file_hashes"][name] == expected
     entries = manifest["tree_manifest"]["files"]
     assert [entry["relative_path"] for entry in entries] == sorted(OFFICIAL_FILES)
     for entry in entries:
         name = entry["relative_path"]
         assert entry["sha256"] == manifest["source_file_hashes"][name]
-        assert entry["size_bytes"] == (FIXTURE_DIR / name).stat().st_size
+        assert entry["size_bytes"] == (COMMITTED_FIXTURES / name).stat().st_size
     expected_tree_hash = canonical.sha256_hex(canonical.canonical_json_bytes(manifest["tree_manifest"]))
     assert manifest["tree_manifest_hash"] == expected_tree_hash
     assert manifest["source_snapshot_id"] == expected_tree_hash
@@ -549,6 +569,52 @@ def test_public_evidence_projection_is_allowlisted_and_free_of_source_text(tmp_p
 
 
 # --- isolation and determinism ----------------------------------------------
+
+
+def test_external_source_directory_is_accepted(tmp_path):
+    """The positive case: a source tree outside the repository proceeds normally."""
+    source_tree = derived_tree(tmp_path)
+    isolation.validate_external_to_repository(reclor.repository_root(), source_tree)
+    snapshot = load(source_tree, tmp_path / "external")
+    assert tuple(record.original_question_id for record in snapshot.questions) == EXPECTED_IDS
+
+
+def test_source_directory_inside_the_repository_is_rejected_before_any_write(tmp_path):
+    data_root = tmp_path / "external"
+    with pytest.raises(isolation.IsolationError, match="must not contain one another"):
+        load(reclor.repository_root() / "permstudy", data_root)
+    assert not data_root.exists()
+
+
+def test_source_directory_reached_through_dotdot_is_rejected_before_any_write(tmp_path):
+    inside = reclor.repository_root() / "permstudy" / ".." / "artifacts" / "task5-in-repo-source-must-not-exist"
+    data_root = tmp_path / "external"
+    with pytest.raises(isolation.IsolationError, match="must not contain one another"):
+        load(inside, data_root)
+    assert not data_root.exists()
+    assert not inside.resolve().exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction behavior")
+def test_source_directory_reached_through_a_junction_is_rejected_before_any_write(tmp_path):
+    alias = tmp_path / "junction"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(alias), str(reclor.repository_root() / "permstudy")],
+        capture_output=True,
+    )
+    if created.returncode:
+        pytest.skip("OS does not permit junctions")
+    data_root = tmp_path / "external"
+    with pytest.raises(isolation.IsolationError, match="must not contain one another"):
+        load(alias, data_root)
+    assert not data_root.exists()
+
+
+def test_source_directory_that_contains_the_repository_is_rejected_before_any_write(tmp_path):
+    data_root = tmp_path / "external"
+    with pytest.raises(isolation.IsolationError, match="must not contain one another"):
+        load(reclor.repository_root().parent, data_root)
+    assert not data_root.exists()
 
 
 def test_data_root_inside_the_repository_is_rejected_before_writing(tmp_path):
