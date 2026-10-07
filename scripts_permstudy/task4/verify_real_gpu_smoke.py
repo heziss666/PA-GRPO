@@ -12,8 +12,12 @@ Evidence sources, all under ``--run-dir`` unless overridden:
 ``dataset_manifest.json``    Task 1 fixture manifest (canonical pair/permutation order)
 ``rollouts/{step}.jsonl``    one file per optimization step, one JSON record per generated row
 ``checkpoints/``             ``global_step_N`` directories and ``latest_checkpointed_iteration.txt``
-``checkpoints/global_step_2/actor/hf/adapter_model.safetensors``  merged LoRA adapter
-``controlled_eval.json``     controlled-evaluation metadata produced by the eval step
+``checkpoints/global_step_2/actor/hf/lora_adapter/adapter_model.safetensors``
+                             merged LoRA adapter (``verl/model_merger/base_model_merger.py:276-280``
+                             always nests it under ``lora_adapter/``); a trainer-saved
+                             ``checkpoints/global_step_2/actor/lora_adapter/…`` is also accepted
+``controlled_eval/``         the real evaluator output tree; every ``summary.json`` beneath it
+                             (``evaluation/evaluate_models.py:1136-1141``) is aggregated
 """
 
 from __future__ import annotations
@@ -49,7 +53,22 @@ PAIR_BASELINE_METRICS = (
 
 PER_STEP_METRICS = ("actor/pg_loss", "actor/grad_norm", "actor/kl_loss")
 
-VLLM_INIT_MARKERS = ("vLLM", "vllm")
+# Only these keys may fail the run through a non-finite value. Scanning every `ident:number`
+# in the log would let an echoed prompt or response containing "x: nan" produce an
+# unexplained hard FAIL.
+FINITE_REQUIRED_METRICS = PER_STEP_METRICS + PAIR_BASELINE_METRICS
+
+# Real vLLM runtime markers. The resolved-config echo printed by
+# `verl/trainer/main_ppo.py:253` contains `hybrid_engine`, `free_cache_engine` and
+# `engine_kwargs: {'vllm': {}}`, so a bare "vllm"+"engine" substring test is satisfied by a
+# run that never started vLLM. These markers do not occur in that echo.
+VLLM_RUNTIME_MARKERS = (
+    "Initializing an LLM engine",
+    "EngineCore",
+    "Loading model weights took",
+    "vLLM API server",
+    "Starting vLLM",
+)
 
 _METRIC_RE = re.compile(
     r"([A-Za-z][A-Za-z0-9_./]*)\s*[:=]\s*(-?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?|nan|NaN|inf|-inf)\b"
@@ -96,6 +115,16 @@ def _finite(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
 
 
+def _as_int(value: Any, *, what: str) -> int:
+    """Convert an evidence value to int, turning malformed input into a contract error."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise EvidenceError(f"{what} is not integer-like: {value!r}")
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise EvidenceError(f"{what} is not integer-like: {value!r}") from exc
+
+
 # ---------------------------------------------------------------------------
 # train log
 # ---------------------------------------------------------------------------
@@ -124,7 +153,9 @@ def parse_train_log(text: str) -> dict[str, Any]:
                 number = float(raw)
             except ValueError:
                 continue
-            if lowered in {"nan", "inf", "-inf"} or not math.isfinite(number):
+            if key in FINITE_REQUIRED_METRICS and (
+                lowered in {"nan", "inf", "-inf"} or not math.isfinite(number)
+            ):
                 nan_or_inf.append(f"{key}={raw}")
             values[key] = number
 
@@ -145,8 +176,8 @@ def parse_train_log(text: str) -> dict[str, Any]:
         "fallback_detected": FALLBACK_MARKER in text,
         "nan_or_inf_metrics": nan_or_inf,
         "identity_errors": identity_errors,
-        "vllm_mention_count": sum(text.count(marker) for marker in VLLM_INIT_MARKERS),
-        "vllm_engine_initialized": ("vllm" in text.lower()) and ("engine" in text.lower()),
+        "vllm_runtime_markers": [marker for marker in VLLM_RUNTIME_MARKERS if marker in text],
+        "vllm_engine_initialized": any(marker in text for marker in VLLM_RUNTIME_MARKERS),
     }
 
 
@@ -349,7 +380,7 @@ def inspect_rollouts(rollout_dir: Path, expected_steps: Sequence[int]) -> dict[s
                 record = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise EvidenceError(f"rollout file {path.name} contains a malformed record") from exc
-            if int(record.get("step", -1)) != int(step):
+            if _as_int(record.get("step", -1), what=f"{path.name} record step") != int(step):
                 raise EvidenceError(f"rollout file {path.name} contains a record from another step")
             records_seen += 1
         rows_per_step[str(step)] = len(lines)
@@ -372,56 +403,118 @@ def inspect_checkpoints(checkpoint_dir: Path, expected_steps: Sequence[int]) -> 
     return {"expected_steps": list(expected_steps), "present_steps": present, "latest_iteration": latest}
 
 
-def inspect_lora(adapter_path: Path) -> dict[str, Any]:
-    if not adapter_path.is_file():
-        raise EvidenceError(f"missing merged LoRA adapter: {adapter_path.name}")
+def _read_adapter_arrays(adapter_path: Path) -> dict[str, np.ndarray]:
+    """Load every adapter tensor as float64 numpy, tolerating bf16/fp16 safetensors.
+
+    ``safetensors.safe_open(framework="numpy")`` raises ``TypeError: data type 'bfloat16'
+    not understood`` for a bf16 adapter, and ``verl/model_merger/base_model_merger.py:296``
+    builds the merged model in bfloat16. The torch framework is tried first and the numpy
+    framework kept as a fallback.
+    """
     try:
         from safetensors import safe_open
     except ImportError as exc:  # pragma: no cover - dependency guard
         raise EvidenceError("safetensors is required to inspect the merged adapter") from exc
 
-    tensor_names: list[str] = []
-    lora_b_names: list[str] = []
-    all_finite = True
-    nonzero_lora_b = False
-    with safe_open(str(adapter_path), framework="numpy") as handle:
-        for name in handle.keys():
-            tensor_names.append(name)
-            array = np.asarray(handle.get_tensor(name))
-            if not np.all(np.isfinite(array)):
-                all_finite = False
-            if "lora_B" in name:
-                lora_b_names.append(name)
-                if array.size and float(np.abs(array).max()) > 0.0:
-                    nonzero_lora_b = True
+    last_error: Exception | None = None
+    for framework in ("pt", "numpy"):
+        arrays: dict[str, np.ndarray] = {}
+        try:
+            if framework == "pt":
+                import torch  # local import: the numpy framework is the fallback
+            with safe_open(str(adapter_path), framework=framework) as handle:
+                for name in handle.keys():
+                    tensor = handle.get_tensor(name)
+                    if framework == "pt":
+                        tensor = tensor.detach().to("cpu", dtype=torch.float32).numpy()
+                    arrays[name] = np.asarray(tensor, dtype=np.float64)
+            return arrays
+        except Exception as exc:  # noqa: BLE001 - try the next framework, then report
+            last_error = exc
+    raise EvidenceError(
+        f"cannot read LoRA adapter {adapter_path.name}: {type(last_error).__name__}"
+    )
+
+
+def inspect_lora(adapter_candidates: Sequence[Path]) -> dict[str, Any]:
+    existing = [path for path in adapter_candidates if path.is_file()]
+    if not existing:
+        raise EvidenceError(
+            "missing merged LoRA adapter; looked for "
+            + ", ".join(str(path) for path in adapter_candidates)
+        )
+    adapter_path = existing[0]
+    arrays = _read_adapter_arrays(adapter_path)
+
+    lora_b_names = sorted(name for name in arrays if "lora_B" in name)
+    all_finite = all(bool(np.all(np.isfinite(array))) for array in arrays.values())
+    nonzero_lora_b = any(
+        array.size and float(np.abs(array).max()) > 0.0 for name, array in arrays.items() if "lora_B" in name
+    )
     return {
         "adapter": adapter_path.name,
-        "tensor_count": len(tensor_names),
+        "adapter_path": str(adapter_path),
+        "adapter_source": "merger_output" if adapter_path == adapter_candidates[0] else "trainer_checkpoint",
+        "tensor_count": len(arrays),
         "lora_b_tensor_count": len(lora_b_names),
-        "lora_b_tensors": sorted(lora_b_names),
+        "lora_b_tensors": lora_b_names,
         "all_finite": all_finite,
         "nonzero_lora_b": nonzero_lora_b,
     }
 
 
 def inspect_controlled_eval(
-    summary_path: Path, expected_contract: str, expected_num_options: int, expected_num_samples: int
+    eval_dir: Path, expected_contract: str, expected_num_options: int, expected_num_samples: int
 ) -> dict[str, Any]:
-    payload = _read_json(summary_path, "controlled-eval summary")
-    if not isinstance(payload, Mapping):
-        raise EvidenceError("controlled-eval summary must be a JSON object")
-    for key in ("evaluation_contract", "num_options", "num_samples"):
-        if key not in payload:
-            raise EvidenceError(f"controlled-eval summary is missing {key}")
+    """Aggregate the real evaluator output tree (``<output_dir>/**/summary.json``).
+
+    ``evaluation/evaluate_models.py:1136-1141`` writes one ``summary.json`` per run whose
+    keys are dataset names, each carrying ``evaluated_samples``, ``evaluation_contract`` and
+    ``num_options`` (``:311-318``). Nothing here is defaulted: a missing key is a contract
+    error, so the gate is bound to captured output rather than to a CLI flag.
+    """
+    if not eval_dir.is_dir():
+        raise EvidenceError(f"missing controlled-eval output directory: {eval_dir}")
+    summary_files = sorted(eval_dir.rglob("summary.json"))
+    if not summary_files:
+        raise EvidenceError(f"controlled-eval output contains no summary.json under {eval_dir.name}")
+
+    datasets: dict[str, Any] = {}
+    contracts: set[str] = set()
+    option_counts: set[int] = set()
+    total_samples = 0
+    for path in summary_files:
+        payload = _read_json(path, "controlled-eval summary")
+        if not isinstance(payload, Mapping) or not payload:
+            raise EvidenceError(f"{path.name} must be a non-empty JSON object")
+        for name in sorted(payload):
+            entry = payload[name]
+            if not isinstance(entry, Mapping):
+                raise EvidenceError(f"controlled-eval entry {name!r} is not an object")
+            for key in ("evaluated_samples", "evaluation_contract", "num_options"):
+                if key not in entry:
+                    raise EvidenceError(f"controlled-eval entry {name!r} is missing {key}")
+            samples = _as_int(entry["evaluated_samples"], what=f"{name}.evaluated_samples")
+            options = _as_int(entry["num_options"], what=f"{name}.num_options")
+            contract = str(entry["evaluation_contract"])
+            datasets[name] = {
+                "evaluated_samples": samples,
+                "evaluation_contract": contract,
+                "num_options": options,
+            }
+            contracts.add(contract)
+            option_counts.add(options)
+            total_samples += samples
+
     return {
-        "path": summary_path.name,
-        "evaluation_contract": payload["evaluation_contract"],
-        "num_options": payload["num_options"],
-        "num_samples": payload["num_samples"],
+        "summary_files": [path.name for path in summary_files],
+        "datasets": datasets,
+        "evaluation_contracts": sorted(contracts),
+        "num_options_values": sorted(option_counts),
+        "total_evaluated_samples": total_samples,
         "expected_contract": expected_contract,
         "expected_num_options": expected_num_options,
         "expected_num_samples": expected_num_samples,
-        "completed": bool(payload.get("completed", True)),
     }
 
 
@@ -438,8 +531,8 @@ class VerifyPaths:
     train_log: Path
     rollout_dir: Path
     checkpoint_dir: Path
-    merged_adapter: Path
-    controlled_eval: Path
+    merged_adapter_candidates: Sequence[Path]
+    controlled_eval_dir: Path
 
 
 def verify_real_gpu_smoke(
@@ -475,11 +568,28 @@ def verify_real_gpu_smoke(
         window_bytes = handle.read(end - start)
     window_lines = window_bytes.decode("utf-8", errors="replace").splitlines()
 
+    # Path mismatch detector: the launcher records the reward log it windowed in
+    # environment.txt, so a window JSON pointing at another run's log is caught rather
+    # than silently accepted.
+    environment_text = _read_text(run_dir / "environment.txt", "launcher environment record")
+    recorded_logs = [
+        line.split("=", 1)[1]
+        for line in environment_text.splitlines()
+        if line.startswith("reward_log=")
+    ]
+    if not recorded_logs:
+        raise EvidenceError("environment.txt does not record the reward log path")
+    recorded_log = recorded_logs[0]
+    if Path(recorded_log).resolve() != Path(reward_path).resolve():
+        raise EvidenceError(
+            "reward log window path does not match the path the launcher recorded in environment.txt"
+        )
+
     rollouts = inspect_rollouts(paths.rollout_dir, expected_steps)
     checkpoints = inspect_checkpoints(paths.checkpoint_dir, expected_steps)
-    lora = inspect_lora(paths.merged_adapter)
+    lora = inspect_lora(paths.merged_adapter_candidates)
     controlled_eval = inspect_controlled_eval(
-        paths.controlled_eval, expected_eval_contract, expected_num_options, expected_num_samples
+        paths.controlled_eval_dir, expected_eval_contract, expected_num_options, expected_num_samples
     )
     identity = analyse_identity(window_lines, dataset_manifest, expected_blocks=len(expected_steps))
     identity["window"] = {
@@ -583,20 +693,19 @@ def verify_real_gpu_smoke(
     elif not lora["nonzero_lora_b"]:
         failures.append("every lora_B tensor is zero: no optimizer update was saved")
 
-    if not controlled_eval["completed"]:
-        failures.append("controlled evaluation did not complete")
-    if controlled_eval["evaluation_contract"] != expected_eval_contract:
+    if controlled_eval["evaluation_contracts"] != [expected_eval_contract]:
         failures.append(
-            f"controlled evaluation contract is {controlled_eval['evaluation_contract']!r}, "
-            f"expected {expected_eval_contract!r}"
+            f"controlled evaluation contracts are {controlled_eval['evaluation_contracts']}, "
+            f"expected [{expected_eval_contract!r}]"
         )
-    if int(controlled_eval["num_options"]) != expected_num_options:
+    if controlled_eval["num_options_values"] != [expected_num_options]:
         failures.append(
-            f"controlled evaluation num_options is {controlled_eval['num_options']}, expected {expected_num_options}"
+            f"controlled evaluation num_options values are {controlled_eval['num_options_values']}, "
+            f"expected [{expected_num_options}]"
         )
-    if int(controlled_eval["num_samples"]) != expected_num_samples:
+    if controlled_eval["total_evaluated_samples"] != expected_num_samples:
         failures.append(
-            f"controlled evaluation num_samples is {controlled_eval['num_samples']}, "
+            f"controlled evaluation evaluated {controlled_eval['total_evaluated_samples']} sample(s), "
             f"expected {expected_num_samples}"
         )
 
@@ -650,7 +759,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rollout-dir", default=None)
     parser.add_argument("--checkpoint-dir", default=None)
     parser.add_argument("--merged-adapter", default=None)
-    parser.add_argument("--controlled-eval", default=None)
+    parser.add_argument("--controlled-eval-dir", default=None)
     parser.add_argument("--expected-eval-contract", default="controlled")
     parser.add_argument("--expected-num-options", type=int, default=2)
     parser.add_argument("--expected-num-samples", type=int, default=4)
@@ -668,12 +777,17 @@ def resolve_paths(args: argparse.Namespace) -> VerifyPaths:
         train_log=Path(args.train_log) if args.train_log else run_dir / "train.log",
         rollout_dir=Path(args.rollout_dir) if args.rollout_dir else run_dir / "rollouts",
         checkpoint_dir=Path(args.checkpoint_dir) if args.checkpoint_dir else run_dir / "checkpoints",
-        merged_adapter=Path(args.merged_adapter)
-        if args.merged_adapter
-        else run_dir / "checkpoints" / "global_step_2" / "actor" / "hf" / "adapter_model.safetensors",
-        controlled_eval=Path(args.controlled_eval)
-        if args.controlled_eval
-        else run_dir / "controlled_eval.json",
+        merged_adapter_candidates=(
+            [Path(args.merged_adapter)]
+            if args.merged_adapter
+            else [
+                # what `verl/model_merger merge --target_dir …/actor/hf` writes
+                run_dir / "checkpoints" / "global_step_2" / "actor" / "hf" / "lora_adapter" / "adapter_model.safetensors",
+                # what the trainer's own checkpoint save writes
+                run_dir / "checkpoints" / "global_step_2" / "actor" / "lora_adapter" / "adapter_model.safetensors",
+            ]
+        ),
+        controlled_eval_dir=Path(args.controlled_eval_dir) if args.controlled_eval_dir else run_dir / "controlled_eval",
     )
 
 

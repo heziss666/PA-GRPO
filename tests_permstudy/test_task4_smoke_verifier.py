@@ -89,7 +89,10 @@ def write_train_log(
 ) -> None:
     lines = []
     if vllm:
-        lines.append("INFO 01-01 00:00:00 vllm_worker.py:88] vLLM engine v0.8.5 initialized (enforce_eager=True)")
+        # a real vLLM runtime line (not the resolved-config echo, which contains
+        # `hybrid_engine`/`free_cache_engine`/`engine_kwargs` and must not satisfy this gate)
+        lines.append("INFO 01-01 00:00:00 engine.py:88] Initializing an LLM engine (v0.8.5) with config:")
+        lines.append("INFO 01-01 00:00:00 model_runner.py:907] Loading model weights took 15.1234 GB")
     for step in steps:
         parts = [
             f"step:{step}",
@@ -206,15 +209,29 @@ def write_checkpoints(
     lora_b_zero: bool = False,
     non_finite_tensor: bool = False,
     include_lora_b: bool = True,
+    bfloat16: bool = False,
 ) -> None:
     checkpoints = run_dir / "checkpoints"
     for step in steps:
         (checkpoints / f"global_step_{step}").mkdir(parents=True, exist_ok=True)
     checkpoints.mkdir(parents=True, exist_ok=True)
     (checkpoints / "latest_checkpointed_iteration.txt").write_text(f"{latest}\n", encoding="utf-8")
-    target = checkpoints / "global_step_2" / "actor" / "hf"
+    # `verl/model_merger merge --target_dir …/actor/hf` nests the adapter under lora_adapter/
+    target = checkpoints / "global_step_2" / "actor" / "hf" / "lora_adapter"
     target.mkdir(parents=True, exist_ok=True)
     if not adapter:
+        return
+    if bfloat16:
+        import torch
+        from safetensors.torch import save_file as save_torch_file
+
+        save_torch_file(
+            {
+                "base_model.model.q_proj.lora_A.weight": torch.zeros((2, 2), dtype=torch.bfloat16),
+                "base_model.model.q_proj.lora_B.weight": torch.full((2, 2), 0.25, dtype=torch.bfloat16),
+            },
+            str(target / "adapter_model.safetensors"),
+        )
         return
     if non_finite_tensor:
         b_value = np.full((2, 2), np.inf, dtype=np.float32)
@@ -233,20 +250,27 @@ def write_controlled_eval(
     *,
     contract: str = "controlled",
     num_options: int = 2,
-    num_samples: int = 4,
-    completed: bool = True,
+    evaluated_samples: int = 4,
 ) -> None:
-    (run_dir / "controlled_eval.json").write_text(
-        json.dumps(
-            {
-                "evaluation_contract": contract,
-                "num_options": num_options,
-                "num_samples": num_samples,
-                "completed": completed,
-            }
-        ),
-        encoding="utf-8",
-    )
+    """Reproduce the real evaluator layout: `<output_dir>/<subdir>/summary.json`.
+
+    `evaluation/evaluate_models.py:1136-1141` writes one summary keyed by dataset name,
+    each entry carrying `evaluated_samples`, `evaluation_contract` and `num_options`
+    (`:311-318`). There is no `completed` key.
+    """
+    subdir = run_dir / "controlled_eval" / "task4_tiny_8pairs_qwen3-8b"
+    subdir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "task4_tiny_8pairs": {
+            "evaluated_samples": evaluated_samples,
+            "correct": 1,
+            "total_with_answer": evaluated_samples,
+            "accuracy": 0.25,
+            "evaluation_contract": contract,
+            "num_options": num_options,
+        }
+    }
+    (subdir / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
 def build_run(tmp_path: Path, **overrides):
@@ -280,6 +304,12 @@ def build_run(tmp_path: Path, **overrides):
             json.dumps({"reward_log_path": str(run_dir / "missing.log"), "start_offset_bytes": 0}),
             encoding="utf-8",
         )
+    # the launcher always records the reward log it windowed, and the verifier cross-checks it
+    window = json.loads((run_dir / "reward_log_window.json").read_text(encoding="utf-8"))
+    reward_log_recorded = overrides.get("environment_reward_log", window["reward_log_path"])
+    (run_dir / "environment.txt").write_text(
+        f"task4_run_id=probe\nreward_log={reward_log_recorded}\n", encoding="utf-8"
+    )
     write_checkpoints(
         run_dir,
         steps=overrides.get("steps", (1, 2)),
@@ -288,13 +318,13 @@ def build_run(tmp_path: Path, **overrides):
         lora_b_zero=overrides.get("lora_b_zero", False),
         non_finite_tensor=overrides.get("non_finite_tensor", False),
         include_lora_b=overrides.get("include_lora_b", True),
+        bfloat16=overrides.get("bfloat16", False),
     )
     write_controlled_eval(
         run_dir,
         contract=overrides.get("contract", "controlled"),
         num_options=overrides.get("num_options", 2),
-        num_samples=overrides.get("num_samples", 4),
-        completed=overrides.get("completed", True),
+        evaluated_samples=overrides.get("evaluated_samples", 4),
     )
     return run_dir
 
@@ -307,8 +337,11 @@ def paths_for(verifier, run_dir: Path):
         train_log=run_dir / "train.log",
         rollout_dir=run_dir / "rollouts",
         checkpoint_dir=run_dir / "checkpoints",
-        merged_adapter=run_dir / "checkpoints" / "global_step_2" / "actor" / "hf" / "adapter_model.safetensors",
-        controlled_eval=run_dir / "controlled_eval.json",
+        merged_adapter_candidates=[
+            run_dir / "checkpoints" / "global_step_2" / "actor" / "hf" / "lora_adapter" / "adapter_model.safetensors",
+            run_dir / "checkpoints" / "global_step_2" / "actor" / "lora_adapter" / "adapter_model.safetensors",
+        ],
+        controlled_eval_dir=run_dir / "controlled_eval",
     )
 
 
@@ -472,10 +505,102 @@ def test_wrong_num_options_fails(tmp_path):
         verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
 
 
-def test_incomplete_evaluation_fails(tmp_path):
+def test_evaluated_sample_count_is_enforced_from_the_real_summary(tmp_path):
     verifier = load_verifier()
-    run_dir = build_run(tmp_path, completed=False)
-    with pytest.raises(verifier.VerificationFailed, match="did not complete"):
+    run_dir = build_run(tmp_path, evaluated_samples=2)
+    with pytest.raises(verifier.VerificationFailed, match="evaluated 2 sample"):
+        verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+
+
+def test_missing_eval_key_is_a_contract_error_not_a_default(tmp_path):
+    """A summary lacking a required key must fail as evidence, never be defaulted."""
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path)
+    summary_path = next((run_dir / "controlled_eval").rglob("summary.json"))
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    for entry in payload.values():
+        entry.pop("evaluation_contract")
+    summary_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(verifier.EvidenceError, match="evaluation_contract"):
+        verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+
+
+def test_malformed_evidence_is_a_contract_error_not_a_crash(tmp_path):
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path)
+    summary_path = next((run_dir / "controlled_eval").rglob("summary.json"))
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    for entry in payload.values():
+        entry["num_options"] = None
+    summary_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(verifier.EvidenceError, match="num_options"):
+        verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+
+
+def test_bfloat16_adapter_is_readable(tmp_path):
+    """`safe_open(framework="numpy")` cannot see bf16, and the merger writes bf16."""
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path, bfloat16=True)
+    summary = verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+    assert summary["lora"]["adapter_source"] == "merger_output"
+    assert summary["lora"]["nonzero_lora_b"] is True
+
+
+def test_trainer_saved_adapter_is_accepted_as_a_fallback(tmp_path):
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path)
+    merged = run_dir / "checkpoints" / "global_step_2" / "actor" / "hf" / "lora_adapter"
+    trainer_saved = run_dir / "checkpoints" / "global_step_2" / "actor" / "lora_adapter"
+    trainer_saved.mkdir(parents=True, exist_ok=True)
+    for item in merged.iterdir():
+        item.rename(trainer_saved / item.name)
+    merged.rmdir()
+    summary = verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+    assert summary["lora"]["adapter_source"] == "trainer_checkpoint"
+
+
+def test_vllm_gate_is_not_satisfied_by_the_config_echo(tmp_path):
+    """The resolved-config echo contains `hybrid_engine`/`free_cache_engine`/`engine_kwargs`."""
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path, vllm=False)
+    (run_dir / "train.log").write_text(
+        "train.log\n"
+        "actor_rollout_ref:\n"
+        "  rollout:\n"
+        "    name: 'hf'\n"
+        "    free_cache_engine: true\n"
+        "    engine_kwargs: {'vllm': {}}\n"
+        "    hybrid_engine: true\n"
+        "step:1 - actor/pg_loss:0.5 - actor/grad_norm:0.75 - actor/kl_loss:0.01\n"
+        "step:2 - actor/pg_loss:0.5 - actor/grad_norm:0.75 - actor/kl_loss:0.01\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(verifier.VerificationFailed, match="vLLM engine initialization"):
+        verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+
+
+def test_echoed_non_finite_text_does_not_fail_the_run(tmp_path):
+    """Only the required metric keys may fail the run through a non-finite value."""
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path)
+    with (run_dir / "train.log").open("a", encoding="utf-8") as handle:
+        handle.write("reward_manager.py:126] response: 'the value is x: nan here'\n")
+    summary = verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+    assert summary["nan_or_inf_metrics"] == []
+
+
+def test_reward_log_path_mismatch_is_rejected(tmp_path):
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path, environment_reward_log="/somewhere/else/reward.log")
+    with pytest.raises(verifier.EvidenceError, match="does not match"):
+        verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+
+
+def test_missing_launcher_environment_record_is_rejected(tmp_path):
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path)
+    (run_dir / "environment.txt").unlink()
+    with pytest.raises(verifier.EvidenceError, match="environment record"):
         verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
 
 
