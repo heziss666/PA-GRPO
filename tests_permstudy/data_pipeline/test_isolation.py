@@ -107,6 +107,100 @@ def test_xdg_cache_default_is_checked(tmp_path):
         isolation.validate_external_roots(tmp_path / "repo", tmp_path / "data", {"XDG_CACHE_HOME": str(tmp_path / "repo" / "cache")})
 
 
+@pytest.mark.parametrize("kind", ["HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"])
+@pytest.mark.parametrize("syntax", ["tilde", "dollar", "braces", "percent"])
+def test_cache_expansion_cannot_hide_repository_containment(tmp_path, monkeypatch, kind, syntax):
+    isolation = load_isolation()
+    if syntax == "percent" and os.name != "nt":
+        pytest.skip("percent environment expansion is Windows-specific")
+    # The expansion variables are synthetic runtime inputs, never committed paths.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PAGRPO_TEST_REPO", str(tmp_path / "repo"))
+    value = {"tilde": "~/repo/cache", "dollar": "$PAGRPO_TEST_REPO/cache",
+             "braces": "${PAGRPO_TEST_REPO}/cache", "percent": "%PAGRPO_TEST_REPO%/cache"}[syntax]
+    env = external_env(tmp_path)
+    env[kind] = value
+    with pytest.raises(isolation.IsolationError, match="cache"):
+        isolation.validate_external_roots(tmp_path / "repo", tmp_path / "data", env)
+
+
+@pytest.mark.parametrize("kind", ["HF_ASSETS_CACHE", "HUGGINGFACE_ASSETS_CACHE", "HF_XET_CACHE"])
+def test_assets_and_xet_cache_overrides_inside_repo_are_rejected(tmp_path, kind):
+    isolation = load_isolation()
+    env = external_env(tmp_path)
+    env[kind] = str(tmp_path / "repo" / "cache")
+    with pytest.raises(isolation.IsolationError, match="cache"):
+        isolation.validate_external_roots(tmp_path / "repo", tmp_path / "data", env)
+
+
+def test_default_assets_and_xet_caches_are_in_report(tmp_path):
+    isolation = load_isolation()
+    report = isolation.validate_external_roots(tmp_path / "repo", tmp_path / "data", external_env(tmp_path))
+    assert {"HF_ASSETS_CACHE", "HF_XET_CACHE"} <= set(report.effective_cache_kinds)
+
+
+def test_xet_literal_tilde_path_uses_pinned_unexpanded_semantics(tmp_path, monkeypatch):
+    isolation = load_isolation()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "external-home"))
+    monkeypatch.setenv("HOME", str(tmp_path / "external-home"))
+    env = external_env(tmp_path)
+    # huggingface_hub 0.36.0 does not expand its HF_XET_CACHE override.
+    env["HF_XET_CACHE"] = "~/literal-cache"
+    with pytest.raises(isolation.IsolationError, match="cache"):
+        isolation.validate_external_roots(repo, tmp_path / "data", env)
+
+
+@pytest.mark.parametrize("name", ["assets", "xet"])
+def test_default_assets_and_xet_alias_into_repo_is_rejected(tmp_path, name):
+    isolation = load_isolation()
+    repo, hf_home = tmp_path / "repo", tmp_path / "cache"
+    repo.mkdir()
+    hf_home.mkdir()
+    alias = hf_home / name
+    if os.name == "nt":
+        created = subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(repo)], capture_output=True)
+        if created.returncode:
+            pytest.skip("OS does not permit junctions")
+    else:
+        alias.symlink_to(repo, target_is_directory=True)
+    with pytest.raises(isolation.IsolationError, match="cache"):
+        isolation.validate_external_roots(repo, tmp_path / "data", external_env(tmp_path))
+
+
+@pytest.mark.parametrize("key", ["LLMResponse", "QUESTIONText", "LLMGoldAnswer", "RAWPrompt", "HTTPContext"])
+def test_acronym_sensitive_keys_are_rejected(key):
+    isolation = load_isolation()
+    with pytest.raises(isolation.SafeLoggingError):
+        isolation.sanitize_public_manifest({"aggregate_statistics": {key: "synthetic-secret"}})
+
+
+@pytest.mark.parametrize("value", ["failed:/private/user/data", "failed:C:/private/user/data",
+                                    "failed:C:\\private\\user\\data", "failed://server/private/data"])
+def test_public_log_rejects_embedded_paths(value):
+    isolation = load_isolation()
+    with pytest.raises(isolation.SafeLoggingError):
+        isolation.safe_log_fields({"status": value})
+
+
+@pytest.mark.parametrize("value", ["file:/private/user/data", "file:///private/user/data",
+                                    "failed:C:/private/user/data", "file://server/private/data",
+                                    "failed=/private/user/data"])
+def test_public_manifest_rejects_embedded_paths_and_uris(value):
+    isolation = load_isolation()
+    with pytest.raises(isolation.SafeLoggingError):
+        isolation.sanitize_public_manifest({"aggregate_statistics": {"mean": value}})
+
+
+def test_aggregate_metadata_and_model_identifiers_remain_supported():
+    isolation = load_isolation()
+    payload = {"generator_model": "org/model", "aggregate_statistics": {"mean": 1.25, "method": "bootstrap_v1", "sample_count": 4}}
+    assert isolation.sanitize_public_manifest(payload) == payload
+
+
 @pytest.mark.parametrize("fields", [
     {"response": "synthetic secret"}, {"HF_TOKEN": "hf_syntheticsecret"},
     {"candidate_id": "/private/secret"}, {"candidate_id": "C:\\private\\secret"},

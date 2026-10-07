@@ -49,7 +49,9 @@ _SENSITIVE_WORDS = frozenset({
     "questions", "responses", "prompts", "solutions", "contexts", "answers",
     "token", "secret", "password", "path",
 })
-_SAFE_STRING = re.compile(r"[A-Za-z0-9_.:/+@=,()\-]+\Z")
+_SAFE_STRING = re.compile(r"[A-Za-z0-9_./+@=,()\-]+\Z")
+_SAFE_CODE = re.compile(r"[A-Za-z0-9_.\-]+\Z")
+_EMBEDDED_PATH = re.compile(r"//|(?:^|[=,(@])/")
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -72,8 +74,9 @@ def _contains(parent: str, child: str) -> bool:
 
 def _effective_caches(env: Mapping[str, str]) -> dict[str, Path]:
     cache_base = Path(env.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
-    hf_home = Path(env.get("HF_HOME", str(cache_base / "huggingface")))
-    hub = Path(env.get("HF_HUB_CACHE", env.get("HUGGINGFACE_HUB_CACHE", str(hf_home / "hub"))))
+    hf_home = _cache_path(env.get("HF_HOME", str(cache_base / "huggingface")))
+    hub = _cache_path(env.get("HF_HUB_CACHE", env.get("HUGGINGFACE_HUB_CACHE", str(hf_home / "hub"))))
+    assets = _cache_path(env.get("HF_ASSETS_CACHE", env.get("HUGGINGFACE_ASSETS_CACHE", str(hf_home / "assets"))))
     legacy_bert = env.get("PYTORCH_PRETRAINED_BERT_CACHE", str(hub))
     legacy_transformers = env.get("PYTORCH_TRANSFORMERS_CACHE", legacy_bert)
     caches = {
@@ -81,12 +84,20 @@ def _effective_caches(env: Mapping[str, str]) -> dict[str, Path]:
         "HUGGINGFACE_HUB_CACHE": hub,
         "TRANSFORMERS_CACHE": Path(env.get("TRANSFORMERS_CACHE", legacy_transformers)),
         "HF_DATASETS_CACHE": Path(env.get("HF_DATASETS_CACHE", str(hf_home / "datasets"))),
+        "HF_ASSETS_CACHE": assets,
+        # The pinned hub expands home/hub/assets, but keeps Xet overrides literal.
+        "HF_XET_CACHE": Path(env.get("HF_XET_CACHE", str(hf_home / "xet"))),
     }
     # Check supplied legacy/new aliases too: another installed version may use them.
-    for kind in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "PYTORCH_PRETRAINED_BERT_CACHE", "PYTORCH_TRANSFORMERS_CACHE"):
+    for kind in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HUGGINGFACE_ASSETS_CACHE", "PYTORCH_PRETRAINED_BERT_CACHE", "PYTORCH_TRANSFORMERS_CACHE"):
         if kind in env:
-            caches[kind] = Path(env[kind])
+            caches[kind] = (Path(env[kind]) if kind.startswith("PYTORCH_") else _cache_path(env[kind]))
     return caches
+
+
+def _cache_path(value: str) -> Path:
+    """Match HF's expanduser-then-expandvars order before path resolution."""
+    return Path(os.path.expandvars(os.path.expanduser(value)))
 
 
 def validate_external_roots(repo_root: Path, data_root: Path, env: Mapping[str, str]) -> IsolationReport:
@@ -130,6 +141,7 @@ def _safe_string(value: object) -> bool:
         isinstance(value, str)
         and bool(_SAFE_STRING.fullmatch(value))
         and not value.startswith("/")
+        and not _EMBEDDED_PATH.search(value)
         and not PureWindowsPath(value).drive
         and "hf_" not in value.lower()
         and not any(part == ".." for part in value.split("/"))
@@ -152,6 +164,8 @@ def safe_log_fields(fields: Mapping[str, object]) -> dict[str, object]:
     for key, value in fields.items():
         valid = (_count(value) if key in {"count", "retry_count"}
                  else _number(value) if key == "elapsed_seconds" else _safe_string(value))
+        if key in {"status", "error_type"}:
+            valid = valid and bool(_SAFE_CODE.fullmatch(value))
         if not valid:
             raise SafeLoggingError("public log contains unsafe values")
         result[key] = value
@@ -162,7 +176,8 @@ def _nested(value: object, kind: str = "scalar") -> object:
     if isinstance(value, Mapping):
         result = {}
         for key, item in value.items():
-            words = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key) if isinstance(key, str) else ""
+            words = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key) if isinstance(key, str) else ""
+            words = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", words)
             if not _safe_string(key) or set(re.split(r"[^a-z0-9]+", words.lower())) & _SENSITIVE_WORDS:
                 raise SafeLoggingError("public manifest contains unsafe nested fields")
             result[key] = _nested(item, kind)
