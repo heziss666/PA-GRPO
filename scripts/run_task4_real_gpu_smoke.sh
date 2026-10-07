@@ -8,9 +8,9 @@
 # Every precondition -- including the reward-log sizing probe and the Hydra
 # composition -- is checked BEFORE the run directory is created, so a failed
 # precondition leaves no half-built run directory that would refuse a retry.
-# Runtime paths are absolutised against PROJECT_ROOT before any check, so a
-# relative TASK4_RUN_DIR / REWARD_LOG can never be validated in one directory
-# and used in another.
+# The run directory is absolutised against PROJECT_ROOT before any check, so a
+# relative TASK4_RUN_DIR can never be validated in one directory and used in
+# another. REWARD_LOG is never taken from the environment.
 #
 # Exit codes: 2 = precondition/capture failure, otherwise the trainer's status.
 #
@@ -91,9 +91,16 @@ REWARD_LOG="$PROJECT_ROOT/logs/judge_qwen3_8b.log"
 # checkout that loses the whole first step's BASE/PAIR_CHECK evidence silently,
 # and the verifier requires one reward block per step.
 # ---------------------------------------------------------------------------
-mkdir -p "$(dirname "$REWARD_LOG")"
+if ! mkdir -p "$(dirname "$REWARD_LOG")"; then
+  echo "refusing to run: cannot create the reward log directory: $(dirname "$REWARD_LOG")" >&2
+  exit 2
+fi
 if ! touch "$REWARD_LOG"; then
   echo "refusing to run: cannot create the reward log: $REWARD_LOG" >&2
+  exit 2
+fi
+if [ ! -f "$REWARD_LOG" ]; then
+  echo "refusing to run: reward log is not a regular file: $REWARD_LOG" >&2
   exit 2
 fi
 if [ ! -r "$REWARD_LOG" ]; then

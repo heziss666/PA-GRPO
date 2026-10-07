@@ -409,3 +409,14 @@ def test_every_launcher_override_resolves_and_forces_explicit_identity():
     assert cfg.grouping.identity_mode == "explicit"
     for key in key_overrides:
         assert OmegaConf.select(cfg, key) is not None, f"launcher override does not resolve: {key}"
+
+
+def test_reward_log_directory_failure_uses_the_documented_exit_code():
+    """A non-directory `logs` used to die on `set -e` with exit 1, contradicting the contract."""
+    text = launcher_text()
+    assert re.search(r'if ! mkdir -p "\$\(dirname "\$REWARD_LOG"\)"; then', text), (
+        "the log-directory creation must carry its own exit-2 guard"
+    )
+    assert re.search(r'if \[ ! -f "\$REWARD_LOG" \]; then', text), (
+        "a non-regular file at the log path (e.g. a FIFO) must be refused before the trainer blocks on it"
+    )

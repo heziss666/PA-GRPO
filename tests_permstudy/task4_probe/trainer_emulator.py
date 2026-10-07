@@ -108,8 +108,25 @@ adapter_dir = RUN / "checkpoints" / f"global_step_{STEPS[-1]}" / "actor" / "hf" 
 adapter_dir.mkdir(parents=True, exist_ok=True)
 shutil.copy2(ADAPTER_SRC, adapter_dir / "adapter_model.safetensors")
 # the normalized config the Task 5 step must produce before the controlled evaluation
-(adapter_dir / "adapter_config.json").write_text(
+adapter_config_path = adapter_dir / "adapter_config.json"
+adapter_config_path.write_text(
     json.dumps({"r": 32, "lora_alpha": 64, "target_modules": ["q_proj"], "peft_type": "LORA"}),
+    encoding="utf-8",
+)
+# the Task 5 correction step's evidence, digest-bound to the config above
+import hashlib
+
+(adapter_dir / "adapter_normalization.json").write_text(
+    json.dumps(
+        {
+            "schema_version": "task4_adapter_normalization_v1",
+            "observed_rank": 32,
+            "observed_alpha_before": 0,
+            "observed_alpha_after": 64,
+            "corrected": True,
+            "after_sha256": hashlib.sha256(adapter_config_path.read_bytes()).hexdigest(),
+        }
+    ),
     encoding="utf-8",
 )
 

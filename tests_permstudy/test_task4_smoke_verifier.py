@@ -220,6 +220,7 @@ def write_checkpoints(
     lora_rank: int = 32,
     lora_alpha: int = 64,
     adapter_config: bool = True,
+    normalization: bool = True,
 ) -> None:
     checkpoints = run_dir / "checkpoints"
     for step in steps:
@@ -230,7 +231,8 @@ def write_checkpoints(
     target = checkpoints / "global_step_2" / "actor" / "hf" / "lora_adapter"
     target.mkdir(parents=True, exist_ok=True)
     if adapter_config:
-        (target / "adapter_config.json").write_text(
+        config_path = target / "adapter_config.json"
+        config_path.write_text(
             json.dumps(
                 {
                     "r": lora_rank,
@@ -242,6 +244,22 @@ def write_checkpoints(
             ),
             encoding="utf-8",
         )
+        if normalization:
+            import hashlib
+
+            (target / "adapter_normalization.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "task4_adapter_normalization_v1",
+                        "observed_rank": lora_rank,
+                        "observed_alpha_before": 0,
+                        "observed_alpha_after": lora_alpha,
+                        "corrected": lora_alpha != 0,
+                        "after_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+                    }
+                ),
+                encoding="utf-8",
+            )
     if not adapter:
         return
     if bfloat16:
@@ -349,6 +367,7 @@ def build_run(tmp_path: Path, **overrides):
         lora_rank=overrides.get("lora_rank", 32),
         lora_alpha=overrides.get("lora_alpha", 64),
         adapter_config=overrides.get("adapter_config", True),
+        normalization=overrides.get("normalization", True),
     )
     write_controlled_eval(
         run_dir,
@@ -792,3 +811,25 @@ def test_reordered_manifest_still_defines_the_canonical_order(tmp_path):
     summary = verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
     assert summary["identity"]["reorder_observed"] is True
     assert summary["passed"] is True
+
+
+def test_missing_normalization_evidence_fails(tmp_path):
+    """Content checks alone cannot prove a merge: the trainer's own adapter carries r/alpha too."""
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path, normalization=False)
+    with pytest.raises(verifier.EvidenceError, match="adapter_normalization.json"):
+        verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))
+
+
+def test_config_edited_after_normalization_fails(tmp_path):
+    """The normalization digest binds PASS to the config bytes the correction step produced."""
+    verifier = load_verifier()
+    run_dir = build_run(tmp_path)
+    config = (
+        run_dir / "checkpoints" / "global_step_2" / "actor" / "hf" / "lora_adapter" / "adapter_config.json"
+    )
+    payload = json.loads(config.read_text(encoding="utf-8"))
+    payload["lora_alpha"] = 32  # a plausible-looking hand edit after normalization
+    config.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(verifier.EvidenceError, match="modified after the correction step"):
+        verifier.verify_real_gpu_smoke(paths_for(verifier, run_dir))

@@ -13,9 +13,12 @@ Evidence sources, all under ``--run-dir`` unless overridden:
 ``rollouts/{step}.jsonl``    one file per optimization step, one JSON record per generated row
 ``checkpoints/``             ``global_step_N`` directories and ``latest_checkpointed_iteration.txt``
 ``checkpoints/global_step_2/actor/hf/lora_adapter/adapter_model.safetensors``
-                             merged LoRA adapter (``verl/model_merger/base_model_merger.py:276-280``
-                             always nests it under ``lora_adapter/``); a trainer-saved
-                             ``checkpoints/global_step_2/actor/lora_adapter/…`` is also accepted
+                             the merged LoRA adapter (``verl/model_merger/base_model_merger.py:276-280``
+                             always nests it under ``lora_adapter/``). Only this path can satisfy the
+                             Task 4 merge contract, and its ``adapter_config.json`` must be accompanied
+                             by the ``adapter_normalization.json`` the Task 5 correction step writes.
+``adapter_normalization.json``  beside the merged adapter; its ``after_sha256`` must match the
+                             current ``adapter_config.json``, so hand-editing the config afterwards fails
 ``controlled_eval/``         the real evaluator output tree; every ``summary.json`` beneath it
                              (``evaluation/evaluate_models.py:1136-1141``) is aggregated
 """
@@ -23,6 +26,7 @@ Evidence sources, all under ``--run-dir`` unless overridden:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -536,6 +540,29 @@ def inspect_adapter_config(adapter_path: Path, expected_rank: int, expected_alph
             raise EvidenceError(f"adapter_config.json is missing {key}")
     rank = _as_int(payload["r"], what="adapter_config.r")
     alpha = _as_int(payload["lora_alpha"], what="adapter_config.lora_alpha")
+
+    # `--merged-adapter` can point anywhere, and the trainer's own saved adapter
+    # (`verl/workers/fsdp_workers.py:1049-1065`) carries the real peft values too, so content
+    # checks alone cannot prove a merge happened. `adapter_normalization.json` is produced only
+    # by the Task 5 correction step, and its after_sha256 binds it to the config's current bytes.
+    normalization_path = adapter_path.parent / "adapter_normalization.json"
+    if not normalization_path.is_file():
+        raise EvidenceError(
+            "missing adapter_normalization.json beside the merged adapter; the Task 5 correction step "
+            "must run between model_merger merge and the controlled evaluation"
+        )
+    normalization = _read_json(normalization_path, "adapter_normalization.json")
+    if not isinstance(normalization, Mapping):
+        raise EvidenceError("adapter_normalization.json must be a JSON object")
+    for key in ("observed_rank", "observed_alpha_after", "after_sha256"):
+        if key not in normalization:
+            raise EvidenceError(f"adapter_normalization.json is missing {key}")
+    config_sha = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    if normalization["after_sha256"] != config_sha:
+        raise EvidenceError(
+            "adapter_config.json does not match the adapter_normalization.json digest, so it was "
+            "modified after the correction step"
+        )
     return {
         "path": config_path.name,
         "r": rank,
@@ -544,6 +571,15 @@ def inspect_adapter_config(adapter_path: Path, expected_rank: int, expected_alph
         "expected_alpha": expected_alpha,
         "scaling": (alpha / rank) if rank else None,
         "expected_scaling": (expected_alpha / expected_rank) if expected_rank else None,
+        "normalization": {
+            "path": normalization_path.name,
+            "observed_rank": _as_int(normalization["observed_rank"], what="normalization.observed_rank"),
+            "observed_alpha_after": _as_int(
+                normalization["observed_alpha_after"], what="normalization.observed_alpha_after"
+            ),
+            "corrected": bool(normalization.get("corrected", False)),
+            "after_sha256_matches": True,
+        },
     }
 
 
