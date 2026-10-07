@@ -172,6 +172,29 @@ def test_fixture_extra_info_is_identity_ready(tmp_path):
         assert row["pair_id"] == row["original_question_id"]
 
 
+def test_extra_info_preserves_index_for_reward_log_reorder_evidence(tmp_path):
+    """`my_reward/judge_qwen.py` logs `idx = extra.get("index", i)`.
+
+    If the fixture omits `index`, every reward-log source index degrades to the
+    post-reorder batch position, so the plan's "reward log source-index order
+    differs from canonical interleaved input order" reorder evidence cannot be
+    satisfied — and a verifier comparing those ascending positions would report a
+    reorder vacuously.
+    """
+    _builder, kwargs, manifest = build(tmp_path, make_pairs(24))
+
+    fixture = pd.read_parquet(kwargs["output"])
+    observed = [int(row["index"]) for row in fixture["extra_info"]]
+    expected = [int(row["row_index"]) for pair in manifest["pairs"] for row in pair["rows"]]
+
+    assert observed == expected
+    assert len(set(observed)) == 16
+    assert observed != sorted(observed), (
+        "the fixture's alternating order must not also sort the source indices, "
+        "otherwise a post-reorder batch position could masquerade as a source index"
+    )
+
+
 # --------------------------------------------------------------------------
 # validation and rejection
 # --------------------------------------------------------------------------

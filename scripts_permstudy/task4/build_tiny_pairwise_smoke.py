@@ -280,7 +280,11 @@ def build_tiny_pairwise_smoke(
                 "permutation": row["permutation"],
                 "winner": pair["winner"],
                 "prompt_tokens": row["prompt_tokens"],
-                "source_row_index": row["position"],
+                # ``index`` is the source dataset's own provenance key and the value
+                # ``my_reward/judge_qwen.py`` logs as ``idx=``. Dropping it would make every
+                # reward-log source index fall back to the post-reorder batch position, which
+                # destroys the plan's "reward log source-index order" reorder evidence.
+                "index": row["position"],
             }
             fixture_rows.append(
                 {
