@@ -1,10 +1,10 @@
 # Controlled Training Data Pipeline Design
 
-**Status:** `DESIGN_SPEC_APPROVED`; implementation not started
+**Status:** `DESIGN_SPEC_APPROVED`; `IMPLEMENTATION_IN_PROGRESS`; Tasks 1-6 complete; Task 7 next
 
 **Branch:** `codex/data-pipeline-plan`
 
-**Scope:** Phase 1 system design only; implementation is intentionally deferred
+**Scope:** Phase 1 system design and implementation only; Phase 2 remains prohibited
 
 **Phase 1 terminal status:** `DATA_PIPELINE_SYSTEM_READY`
 
@@ -25,7 +25,7 @@ Phase 1 must not:
 
 Phase 1 dependencies live in a dedicated exact-pin `requirements-data-pipeline-phase1.txt`. The paper-reproduction `requirements-lock.txt`, the base training requirements, and the existing Windows evaluator-smoke requirements remain unchanged.
 
-The separate detailed plan is maintained at `docs/superpowers/plans/2026-10-06-controlled-training-data-pipeline-phase1.md`. No implementation work begins until that plan's review is approved.
+The approved detailed plan is maintained at `docs/superpowers/plans/2026-10-06-controlled-training-data-pipeline-phase1.md`. Implementation proceeds task-by-task against that plan and its reviewed amendments.
 
 ## 2. Stage boundary
 
@@ -42,6 +42,7 @@ Phase 1 covers:
 - ReClor and MATH verification;
 - deterministic correct-versus-incorrect pair selection;
 - AB/BA permutation construction;
+- deterministic trainer-ready Parquet export compatible with the current explicit-identity GRPO path;
 - verifier audit protocol;
 - Functional and Statistical Gate logic;
 - runtime data-isolation checks;
@@ -71,6 +72,17 @@ meta-llama/Llama-3.1-8B-Instruct
 
 Only a Phase 2 `PASS` permits the 200-pair pilot. `PASS_WITH_WARNINGS` requires explicit human approval; `FAIL` requires changing the recipe, verifier, or generator configuration and rerunning the smoke.
 
+### 2.3 Model roles
+
+The model roles are independent contracts:
+
+- `Qwen3-8B` was used only to validate the Task 4 real trainer/vLLM smoke path;
+- `Qwen/Qwen2.5-7B-Instruct`, `Qwen/Qwen2.5-32B-Instruct`, and `meta-llama/Llama-3.1-8B-Instruct` remain the approved candidate generators;
+- the immutable `Qwen/Qwen2.5-7B-Instruct` tokenizer revision remains the pair-length balancing tokenizer;
+- the controlled experiment backbone remains the separately approved backbone in `PLAN.md`.
+
+A successful smoke with one role never changes another role implicitly. Any such change requires an explicit design decision and a new run/config namespace.
+
 ## 3. Data sources and legal boundary
 
 ### 3.1 MATH
@@ -79,6 +91,7 @@ Only a Phase 2 `PASS` permits the 200-pair pilot. `PASS_WITH_WARNINGS` requires 
 - Use all train configurations.
 - Resolve and record the immutable dataset revision/commit actually used.
 - Record the source snapshot metadata in a private manifest.
+- Before Task 18 writes a real source snapshot, resolve the requested ref to one exact immutable SHA and test both configuration discovery and one pinned-revision train load against that same SHA. If the exact revision is script-only and rejected by the pinned `datasets==4.4.1`, stop before writing and propose a source/dependency protocol change. Do not silently switch to `refs/convert/parquet`, `data_files=`, another revision, or another `datasets` version because each changes source lineage.
 
 ### 3.2 ReClor
 
@@ -388,6 +401,36 @@ BA: A=negative, B=positive
 
 Permutation records inherit the question ID, split, split manifest hash, pair ID, generation run ID, and pinned upstream hashes. They do not independently resplit or recover source files.
 
+### 10.1 Trainer-ready Parquet export
+
+Trainer export is a deterministic consumption layer over immutable questions, successful candidates, selected pairs, and AB/BA permutations. It does not modify canonical private records and is not an upstream dependency of audit or gate computation:
+
+```text
+verification -> pair/permutation
+                 |-> audit/gates
+                 `-> trainer Parquet export
+```
+
+Every exported row contains the current verl-compatible fields:
+
+```text
+data_source
+prompt
+ability
+reward_model.ground_truth
+extra_info.pair_id
+extra_info.original_question_id
+extra_info.permutation_id
+```
+
+`extra_info.pair_id` is exactly `PairRecord.pair_id`; the exporter must not replace it with `original_question_id` or rely on the trainer's compatibility fallback. AB writes the positive response as A, the negative response as B, and ground truth A. BA reverses the surfaces and writes ground truth B. Rows are sorted by `(original_question_id, permutation_id)`.
+
+Prompt template `pairwise_judge_direct_v1` is immutable and hash-pinned. It renders the canonical source question, Response A, and Response B into a two-message chat prompt with system text `Reply with only A or B.` and a user message that ends `Which response is more correct?\nAnswer with A or B only.` MATH renders its problem. ReClor renders context, question, and the ordered A/B/C/D source options. A template change creates a new export run.
+
+The export manifest role-binds the exact split (which pins the question artifacts), generation, pair, and permutation manifest hashes, plus the prompt-template hash. It records the Parquet artifact SHA256, row count, schema version, and export run ID. Candidate response hashes and question content hashes are revalidated before export; free files that are not pinned by these upstream manifests cannot be read.
+
+Acceptance requires an actual Parquet round trip through `verl.utils.dataset.rl_dataset.RLHFDataset` and its production `collate_fn`, then `DataProto`, `attach_permutation_identity`, `repeat_for_rollout`, and `merge_identity_into_extra_infos`. The test must prove nested `prompt`, `reward_model`, and `extra_info` survive pandas/PyArrow serialization and the explicit identity path; an object-only unit test is insufficient.
+
 ## 11. Human verifier audit
 
 The smoke audit uses the exact verified manifest that feeds pair construction. It runs before pair construction or is cryptographically bound to the same verification output.
@@ -536,6 +579,7 @@ permstudy/data_pipeline/
   verification/math.py
   pairs.py
   permutations.py
+  trainer_export.py
   audit.py
   gates.py
 ```
@@ -549,6 +593,7 @@ scripts_permstudy/data/generate_candidates.py
 scripts_permstudy/data/verify_candidates.py
 scripts_permstudy/data/build_reasoning_pairs.py
 scripts_permstudy/data/build_permutations.py
+scripts_permstudy/data/export_training_dataset.py
 scripts_permstudy/data/audit_generator_distribution.py
 scripts_permstudy/data/validate_dataset.py
 scripts_permstudy/data/run_fake_e2e.py
@@ -558,12 +603,25 @@ scripts_permstudy/data/run_fake_e2e.py
 
 Schemas use frozen dataclasses and explicit validators; Phase 1 does not add a schema framework.
 
-Each layer records `run_id`, `schema_version`, direct upstream manifest hash, its own configuration hash, and output manifest hash. A layer may read only:
+Each layer records `run_id`, `schema_version`, direct upstream manifest hash, its own configuration hash, and output manifest hash. The already reviewed Task 1-6 IDs and golden hashes remain unchanged. Beginning with Task 7, every typed stage config contains role-tagged upstream bindings:
+
+```json
+{
+  "upstream_bindings": {
+    "math_questions": "<manifest-hash>",
+    "reclor_questions": "<manifest-hash>"
+  }
+}
+```
+
+The mapping is canonicalized by sorted role key as part of the existing `run_id(stage, config)` input. A bare sorted list is insufficient because it does not prove which upstream hash played which role. `RunManifest.upstream_manifest_hashes` remains the existing sorted list of binding values for compatibility, while the typed config/config hash carries the role association. Missing or unknown roles, non-64-hex values, or a manifest list that differs from the binding values fail before any output write.
+
+A layer may read only:
 
 1. its direct immutable upstream manifest; and
 2. upstream artifacts explicitly referenced and hash-pinned by that manifest.
 
-No layer may read untracked or freely discovered data files. A changed verifier configuration creates a new verification run and therefore new downstream audit, pair, and permutation namespaces without changing the generation run.
+No layer may read untracked or freely discovered data files. Tests must prove that identical parameters and bindings yield the same run ID, while changing one upstream hash or moving the same hash to a different role changes the run ID. A changed verifier configuration creates a new verification run and therefore new downstream audit, pair, permutation, and export namespaces without changing the generation run.
 
 ## 14. Test matrix
 
@@ -581,14 +639,16 @@ Phase 1 tests must cover:
 - MATH gold handshake/caching, question-level gold records, strict terminal extraction, equivalence, ambiguity, separate gold/candidate timeout, and errors with `math-verify==0.9.0`;
 - response normalization, deduplication, fixed-tokenizer length measurement, tie-breaking, run-scoped pair IDs, and canonical pair hashes;
 - exact AB/BA permutation semantics and lineage;
+- role-tagged upstream bindings, including role swaps changing downstream run IDs without changing Task 1-6 golden hashes;
+- trainer-ready Parquet export, artifact/manifest hashes, and a real `RLHFDataset` -> explicit identity -> rollout repeat -> reward-extra-info round trip;
 - deterministic audit sampling, verdicts, and reason codes;
 - all Gate thresholds and status transitions;
 - equivalent semantic candidate-set and downstream canonical hashes on Windows and Linux/WSL; physical execution-history manifests may differ after interruption.
 
 Two end-to-end paths are required:
 
-1. a committed, explicitly marked 80-question synthetic source fixture (40 MATH and 40 ReClor, with ten ReClor labels per option) that runs 90/10 split, deterministic 20+20 train smoke selection, fake generation, verification, audit, pairing, permutation, and gates on Windows/WSL;
-2. a private real-source acquisition and split followed by the fake full pipeline, with all full-text artifacts outside Git.
+1. a committed, explicitly marked 80-question synthetic source fixture (40 MATH and 40 ReClor, with ten ReClor labels per option) that runs 90/10 split, deterministic 20+20 train smoke selection, fake generation, verification, audit, pairing, permutation, gates, and trainer-export round trip on Windows/WSL;
+2. a private real-source acquisition and split followed by the fake full pipeline and trainer-export round trip, with all full-text artifacts outside Git.
 
 ## 15. Phase 1 acceptance criteria
 
@@ -603,6 +663,7 @@ Phase 1 may report `DATA_PIPELINE_SYSTEM_READY` only when all of the following a
 - importing the generation package succeeds without vLLM installed;
 - MATH verification pins `math-verify==0.9.0`;
 - pair and permutation outputs are deterministic and hash-stable;
+- the trainer Parquet export is bound to split/generation/pair/permutation manifests and passes the current verl explicit-identity round trip without a legacy index fallback;
 - sanitized public artifacts pass the field allowlist;
 - Git scanning finds no real source questions, real responses, real source gold, tokens/secrets, private manifests, or user-specific absolute paths;
 - explicitly marked synthetic fixture questions, responses, and gold are the only full-text fixture exception;
@@ -613,4 +674,4 @@ Passing these criteria proves that the data-production system is ready for real 
 
 ## 16. Review checkpoint
 
-The design is approved and the detailed implementation plan is under review. No production pipeline code or real generation begins until the plan review is approved.
+The design and detailed implementation plan are approved. Tasks 1-6 are implemented and reviewed; Task 7 is next. The Task 4 real trainer/vLLM smoke path from `main` is merged into the implementation branch as the trainer-export compatibility target. No Phase 1 completion claim is permitted until Tasks 7-18 plus Task 13A pass their documented reviews, and no real generation begins before a separate Phase 2 plan is approved.

@@ -2,13 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build and verify the Phase 1 controlled training-data production system with real MATH/ReClor acquisition and deterministic splits, fake generation, strict verification, deterministic pairs/permutations, audit/gates, and no real vLLM inference.
+**Goal:** Build and verify the Phase 1 controlled training-data production system with real MATH/ReClor acquisition and deterministic splits, fake generation, strict verification, deterministic pairs/permutations, audit/gates, trainer-ready Parquet export, and no real vLLM inference.
 
-**Architecture:** Implement a new `permstudy.data_pipeline` package whose stages exchange frozen dataclasses and immutable hash-pinned manifests. All full-text production artifacts live below an external `PAGRPO_DATA_ROOT`; Git contains only code, explicitly synthetic fixtures, sanitized summaries, hashes, and test evidence. CLI wrappers under `scripts_permstudy/data/` call the package layer and never bypass lineage or isolation validation.
+**Architecture:** Implement a new `permstudy.data_pipeline` package whose stages exchange frozen dataclasses and immutable hash-pinned manifests. Task 7 and later stage configs role-bind every direct upstream manifest into their existing `run_id(stage, config)` input. Pair/permutation records branch independently to audit/gates and to a trainer-ready Parquet exporter whose output is exercised through the current verl explicit-identity path. All full-text production artifacts live below an external `PAGRPO_DATA_ROOT`; Git contains only code, explicitly synthetic fixtures, sanitized summaries, hashes, and test evidence.
 
 **Tech Stack:** Python 3.12, standard-library dataclasses/enum/hashlib/json/pathlib/multiprocessing, NumPy 1.26, Hugging Face `datasets`/`huggingface-hub`, Transformers tokenizer APIs, `math-verify[antlr4_9_3]==0.9.0`, psutil 7.x, pytest 8.4.
 
 **Spec:** `docs/superpowers/specs/2026-10-06-controlled-training-data-pipeline-design.md`
+
+**Implementation status:** `IMPLEMENTATION_IN_PROGRESS`; Tasks 1-6 complete and reviewed; `fork/main@944e196` merged; Task 7 next. Do not claim `DATA_PIPELINE_SYSTEM_READY` yet.
 
 ## Global Constraints
 
@@ -17,11 +19,14 @@
 - Python version is 3.12 for Windows/WSL Phase 1 and Linux Phase 2.
 - `math-verify[antlr4_9_3]` is pinned exactly to `0.9.0`; runtime code checks the installed version before MATH verification.
 - MATH uses every `EleutherAI/hendrycks_math` train config at a resolved immutable dataset SHA.
+- Task 18 must preflight configuration discovery and one train load at that exact SHA. A script-only failure stops for an explicit source/dependency protocol decision; it must not silently change revision, parquet ref, `data_files`, or `datasets` version.
 - ReClor uses official `train.json` only; official val/test never enter the internal split.
 - `split_seed=42`; all split/sampling units are `original_question_id`.
 - MATH split fallback is whole-source and deterministic: try `category+level`, then `category`, then `source`; never mix fallback levels within one split run.
 - The real-smoke recipe remains 20 MATH + 20 ReClor questions and two samples from each of three pinned generators.
 - Candidate records are keyed by `(generation_run_id, candidate_id)` everywhere.
+- Task 7 and later typed configs contain role-tagged `upstream_bindings`; canonical role keys and hashes participate in `run_id`, while existing Task 1-6 IDs and golden hashes remain unchanged.
+- Qwen3-8B remains only the Task 4 smoke model. Candidate generators, the Qwen2.5-7B pair-length tokenizer, and the controlled experiment backbone retain their separately approved roles.
 - Raw questions, gold, candidate responses, verified pools, pairs, permutations, and private manifests remain outside Git.
 - Production data/cache roots are rejected if either resolved root contains the other or any effective Hugging Face cache is inside the repository.
 - Explicitly synthetic fixtures are the only committed full-text question/response/gold exception.
@@ -51,6 +56,8 @@ pairs/{pair_run_id}/pairs.jsonl
 pairs/{pair_run_id}/manifest.json
 permutations/{permutation_run_id}/permutations.jsonl
 permutations/{permutation_run_id}/manifest.json
+trainer_exports/{export_run_id}/train.parquet
+trainer_exports/{export_run_id}/manifest.json
 gates/{gate_run_id}/report.json
 private_logs/
 ```
@@ -75,6 +82,7 @@ private_logs/
 | `permstudy/data_pipeline/verification/math.py` | Strict boxed extraction and process-isolated math-verify worker |
 | `permstudy/data_pipeline/pairs.py` | Run-scoped dedup groups, fixed-tokenizer lengths, deterministic pair |
 | `permstudy/data_pipeline/permutations.py` | Exact AB/BA records and lineage |
+| `permstudy/data_pipeline/trainer_export.py` | Deterministic Judge prompts, trainer rows, Parquet artifact and export lineage |
 | `permstudy/data_pipeline/audit.py` | Deterministic audit selection/decision validation and reason codes |
 | `permstudy/data_pipeline/gates.py` | Functional/Statistical metrics, thresholds, diagnostics, status |
 | `scripts_permstudy/data/*.py` | Thin CLI argument parsing and package-function dispatch |
@@ -265,9 +273,25 @@ Module-local immutable result types are also fixed:
 - `GenerationPlan(generation_run_id, config_hash, candidates, shard_ids)` and `ShardRunSummary(planned, successful, historical_failures, missing, manifest_hash, semantic_candidate_set_hash)`.
 - `ParsedAnswer(status, answer, error_type)` and `BoxedAnswer(status, boxed_text, error_type)`.
 - `ResponseGroup(response_hash, representative_key, member_keys, member_generators, verification_status)`.
+- `TrainerExportSummary(export_run_id, dataset_artifact, row_count, prompt_template_hash, upstream_bindings, output_manifest_hash)` where `dataset_artifact` is the Parquet `ArtifactRef` and `upstream_bindings` retains role names.
 - `AuditSummary(required_count, completed_count, verdict_counts, confirmed_disagreements, systematic_issue)`.
-- `GateInputs(plans, candidates, verifications, question_verifications, pairs, audit_summary)` plus `FunctionalGateReport(passed, failures, metrics)` and `StatisticalGateReport(status, hard_failures, warnings, diagnostics)`.
+- `GateInputs(plans, candidates, verifications, question_verifications, pairs, permutations, audit_summary)` plus `FunctionalGateReport(passed, failures, metrics)` and `StatisticalGateReport(status, hard_failures, warnings, diagnostics)`.
 - `FakeE2ESummary(run_ids, semantic_candidate_set_hash, downstream_manifest_hashes, counts, phase_status, real_generation_performed)`.
+
+Beginning with Task 7, every stage uses the following exact role-tagged upstream binding set in its typed config. These role names are part of the lineage schema and cannot be renamed without a schema-version change:
+
+| Stage | Required `upstream_bindings` roles |
+|---|---|
+| split | `math_questions`, `reclor_questions` |
+| generation | `split` |
+| verification | `split`, `generation` |
+| pairs | `generation`, `verification` |
+| permutations | `pairs` |
+| audit | `verification` |
+| gates | `generation`, `verification`, `audit`, `pairs`, `permutations` |
+| trainer export | `split`, `generation`, `pairs`, `permutations` |
+
+Every later task must include a test proving that changing one required binding changes its stage run ID. `RunManifest.upstream_manifest_hashes` is the lexicographically sorted list of the mapping values; the mapping itself stays in the private config/config hash so role identity is not lost.
 
 ---
 
@@ -768,22 +792,47 @@ git commit -m "feat(data): acquire immutable MATH train snapshot"
 ### Task 7: Deterministic Split, Fallback, and Smoke Selection
 
 **Files:**
+- Create: `permstudy/data_pipeline/lineage.py`
 - Create: `permstudy/data_pipeline/splitting.py`
+- Create: `tests_permstudy/data_pipeline/test_lineage.py`
 - Create: `tests_permstudy/data_pipeline/test_splitting.py`
 
 **Interfaces:**
+- Produces: `role_bound_stage_config(parameters: Mapping[str, object], upstream_bindings: Mapping[str, str], allowed_roles: Collection[str]) -> dict[str, object]`.
 - Produces: `build_internal_split(questions, split_seed=42) -> SplitBuildResult`.
 - Produces: `select_smoke_questions(assignments, per_source=20, split_seed=42) -> list[SplitAssignment]`.
 
-- [ ] **Step 1: Write failing determinism and leakage tests**
+- [ ] **Step 1: Write failing role-bound lineage tests**
+
+Test the helper with literal 64-hex hashes. Require canonical output independent of mapping insertion order; identical parameters/bindings produce the same existing `ids.run_id`; changing one hash changes the ID; swapping the same two hashes between `math_questions` and `reclor_questions` changes the ID; unknown/missing roles and non-64-hex values fail. Assert `sorted(config["upstream_bindings"].values())` is exactly the unchanged `RunManifest.upstream_manifest_hashes` representation. Do not alter `ids.run_id` or any Task 1-6 golden hash.
+
+- [ ] **Step 2: Run lineage tests and observe failures**
+
+Run: `python -m pytest tests_permstudy/data_pipeline/test_lineage.py -v`
+
+- [ ] **Step 3: Implement the typed role binding helper**
+
+Return exactly:
+
+```python
+{
+    "lineage_schema": "role_tagged_upstream_v1",
+    "parameters": dict(parameters),
+    "upstream_bindings": {role: upstream_bindings[role] for role in sorted(upstream_bindings)},
+}
+```
+
+Validate exact role-set equality against `allowed_roles`, identifier-like nonempty role names, and lowercase 64-hex manifest hashes. The split stage calls it with roles `math_questions` and `reclor_questions`; all later tasks use their own exact allowed role set.
+
+- [ ] **Step 4: Write failing determinism and leakage tests**
 
 Tests assert input reorder does not alter assignments/hash; ReClor uses gold label; MATH chooses `category+level` when feasible, falls back the entire source to `category` when any primary stratum is infeasible, then to `source` when category is infeasible; fallback reasons are recorded; every question occurs once; the exact 90/10 count is stable; smoke uses train only and returns 20 per source; candidate/pair/permutation split mismatches are rejected.
 
-- [ ] **Step 2: Run focused tests and observe failures**
+- [ ] **Step 5: Run focused tests and observe failures**
 
 Run: `python -m pytest tests_permstudy/data_pipeline/test_splitting.py -v`
 
-- [ ] **Step 3: Implement the exact whole-source fallback algorithm**
+- [ ] **Step 6: Implement the exact whole-source fallback algorithm**
 
 For `N` records, set holdout count to `min(N-1, max(1, (N + 5) // 10))`. A stratification level is feasible only if every group has at least two records and `group_count <= holdout_count <= N - group_count`. Choose the first feasible level from the approved fallback chain.
 
@@ -791,16 +840,18 @@ Initialize every group's holdout quota to one. Allocate remaining holdout slots 
 
 Smoke selection uses a separate proportional allocator because 20 samples may be fewer than the number of strata. For each stratum compute `floor(group_size * 20 / source_train_size)`, then distribute remaining slots by descending integer remainder `(group_size * 20) % source_train_size`, canonical stratum key, and available capacity. Within each stratum choose the lowest `SHA256("42\0smoke\0" + original_question_id)` scores. Use the selected MATH split stratification level and ReClor gold labels; fail if a source has fewer than 20 train questions.
 
-- [ ] **Step 4: Add a golden cross-platform hash test**
+The split run config is built with `role_bound_stage_config` and the exact source-manifest bindings. Its manifest stores the sorted binding values in `upstream_manifest_hashes`. The split stage must reject source artifacts whose verified manifest hashes do not equal their named bindings before writing assignments.
+
+- [ ] **Step 7: Add a golden cross-platform hash test**
 
 For the committed synthetic fixture, assert a literal expected `split_manifest_hash`. Run the same test on Windows and WSL; do not update the literal independently per platform.
 
-- [ ] **Step 5: Run focused/full tests and commit**
+- [ ] **Step 8: Run focused/full tests and commit**
 
 ```bash
-python -m pytest tests_permstudy/data_pipeline/test_splitting.py -v
+python -m pytest tests_permstudy/data_pipeline/test_lineage.py tests_permstudy/data_pipeline/test_splitting.py -v
 python -m pytest tests_permstudy -q
-git add permstudy/data_pipeline/splitting.py tests_permstudy/data_pipeline/test_splitting.py
+git add permstudy/data_pipeline/lineage.py permstudy/data_pipeline/splitting.py tests_permstudy/data_pipeline/test_lineage.py tests_permstudy/data_pipeline/test_splitting.py
 git commit -m "feat(data): add deterministic question-level splits"
 ```
 
@@ -1105,6 +1156,97 @@ git commit -m "feat(data): build lineage-safe AB BA permutations"
 
 ---
 
+### Task 13A: Trainer-Ready Parquet Export and Explicit-Identity Round Trip
+
+**Files:**
+- Create: `permstudy/data_pipeline/trainer_export.py`
+- Create: `tests_permstudy/data_pipeline/test_trainer_export.py`
+
+**Interfaces:**
+- Consumes: verified immutable split, generation, pair, and permutation manifests plus their hash-pinned question/candidate/pair/permutation artifacts.
+- Produces: `render_pairwise_judge_prompt(question: QuestionRecord, response_a: str, response_b: str) -> list[dict[str, str]]`.
+- Produces: `build_trainer_rows(questions, candidates, pairs, permutations) -> list[dict[str, object]]`.
+- Produces: `export_trainer_parquet(upstream_manifests, output_dir: Path) -> TrainerExportSummary`.
+
+Audit and gates continue to consume canonical verification/pair/permutation records directly. Neither module may import `trainer_export`, read its Parquet file, or use export status as a quality signal.
+
+- [ ] **Step 1: Write failing row-contract and lineage tests**
+
+Use one synthetic MATH pair and one synthetic ReClor pair. Assert two rows per pair sorted by `(original_question_id, permutation_id)`. Assert the exact fields `data_source`, `prompt`, `ability`, `reward_model`, and `extra_info`; AB is positive/negative with ground truth A, BA is negative/positive with ground truth B. Require `extra_info.pair_id == PairRecord.pair_id`, preserve `original_question_id`, and write canonical integer `permutation_id` without relying on the legacy `permutation` alias.
+
+Assert MATH ability is `math`, ReClor ability is `logical_reasoning`, and `data_source` is `permstudy_pairwise_judge_v1`. Prompt template `pairwise_judge_direct_v1` is exactly:
+
+```python
+[
+    {"role": "system", "content": "Reply with only A or B."},
+    {
+        "role": "user",
+        "content": (
+            f"Question:\n{rendered_question}\n\n"
+            f"Response A:\n{response_a}\n\n"
+            f"Response B:\n{response_b}\n\n"
+            "Which response is more correct?\n"
+            "Answer with A or B only."
+        ),
+    },
+]
+```
+
+MATH `rendered_question` is its canonical problem. ReClor renders `Context:`, `Question:`, then ordered `A.` through `D.` options. Assert a changed selected response hash, question content hash, split hash, missing candidate, duplicate permutation, or non-mirrored surface mapping fails before output. Test role-bound export run IDs for identical bindings, one changed binding, and a role swap.
+
+- [ ] **Step 2: Run contract tests and observe failures**
+
+Run: `python -m pytest tests_permstudy/data_pipeline/test_trainer_export.py -v`
+
+- [ ] **Step 3: Implement deterministic row construction and Parquet writing**
+
+Resolve records only through artifacts referenced by the four required role bindings: `split`, `generation`, `pairs`, and `permutations`. Recompute question/response hashes, validate every pair/permutation join, sort rows, and write `train.parquet` below `trainer_exports/{export_run_id}/`. Use pandas/PyArrow without embedding the index. Build the typed export config with `role_bound_stage_config`, template version/hash, row schema `trainer_pairwise_parquet_v1`, and no runtime path or timestamp in the config hash.
+
+The `reward_model` value is `{"ground_truth": correct_surface, "style": "rule"}`. `extra_info` contains `pair_id`, `original_question_id`, `permutation_id`, `permutation_label`, `source`, `split`, `split_manifest_hash`, `generation_run_id`, `pair_run_id`, and `permutation_run_id`. The export manifest uses the standard `RunManifest` envelope and includes the Parquet `ArtifactRef`, prompt-template hash, row count, and dataset SHA256.
+
+- [ ] **Step 4: Add the actual Parquet-to-trainer integration test**
+
+The test must read the written file through the production loader, not `pandas.read_parquet` alone:
+
+Define a test-local `FakeTrainerTokenizer` with nonempty `chat_template`, `pad_token_id=0`, deterministic `apply_chat_template(..., tokenize=False)`, `encode(..., add_special_tokens=False)`, and `__call__(..., return_tensors="pt", add_special_tokens=False)` returning one-row `input_ids` and `attention_mask` tensors. It performs no network or model download.
+
+```python
+dataset = RLHFDataset(
+    data_files=str(export_path),
+    tokenizer=FakeTrainerTokenizer(),
+    config=OmegaConf.create({
+        "prompt_key": "prompt",
+        "max_prompt_length": 4096,
+        "filter_overlong_prompts": False,
+        "truncation": "error",
+        "return_raw_chat": True,
+        "cache_dir": str(external_cache),
+    }),
+)
+loaded = collate_fn([dataset[index] for index in range(len(dataset))])
+batch = DataProto.from_single_dict(loaded)
+attach_permutation_identity(batch, identity_mode="explicit")
+repeated = repeat_for_rollout(batch, repeat_times=2, identity_mode="explicit")
+merged = merge_identity_into_extra_infos(repeated)
+```
+
+Assert PyArrow/Hugging Face preserve nested `prompt`, `reward_model`, and `extra_info`; pair IDs are the deterministic pair hashes rather than question IDs; permutation IDs are `[0, 1]` before repeat; repeated slots are `[0, 1, 0, 1]` per pair in interleaved order; merged reward extras contain pair/permutation/slot identity. Remove `original_question_id` from a copied row and prove explicit identity still succeeds from `pair_id`; remove `pair_id` and prove the formal exporter validation fails even though the trainer offers a legacy-compatible fallback.
+
+- [ ] **Step 5: Prove audit/gates are export-independent**
+
+Import `permstudy.data_pipeline.audit` and `permstudy.data_pipeline.gates` after blocking imports of `permstudy.data_pipeline.trainer_export`, pandas, and pyarrow. Their focused tests must still pass, demonstrating the dependency branch is `pair/permutation -> {audit/gates, export}` rather than `pair -> export -> audit`.
+
+- [ ] **Step 6: Run focused/full tests and commit**
+
+```bash
+python -m pytest tests_permstudy/data_pipeline/test_trainer_export.py tests_permstudy/test_trainer_identity_integration.py -v
+python -m pytest tests_permstudy -q
+git add permstudy/data_pipeline/trainer_export.py tests_permstudy/data_pipeline/test_trainer_export.py
+git commit -m "feat(data): export trainer-ready pairwise parquet"
+```
+
+---
+
 ### Task 14: Human Audit Selection and Decision Validation
 
 **Files:**
@@ -1193,6 +1335,7 @@ git commit -m "feat(data): implement deterministic pipeline gates"
 - Create: `scripts_permstudy/data/verify_candidates.py`
 - Create: `scripts_permstudy/data/build_reasoning_pairs.py`
 - Create: `scripts_permstudy/data/build_permutations.py`
+- Create: `scripts_permstudy/data/export_training_dataset.py`
 - Create: `scripts_permstudy/data/audit_generator_distribution.py`
 - Create: `scripts_permstudy/data/validate_dataset.py`
 - Create: `scripts_permstudy/data/run_fake_e2e.py`
@@ -1214,13 +1357,14 @@ The fixed CLI argument contract is:
 | `verify_candidates.py` | `--data-root`, `--generation-manifest`, `--gold-timeout-seconds`, `--candidate-timeout-seconds` | verification run with separate question/candidate records |
 | `build_reasoning_pairs.py` | `--data-root`, `--verification-manifest`, `--tokenizer-revision` | pair run |
 | `build_permutations.py` | `--data-root`, `--pair-manifest` | permutation run |
+| `export_training_dataset.py` | `--data-root`, `--split-manifest`, `--generation-manifest`, `--pair-manifest`, `--permutation-manifest` | trainer Parquet export run |
 | `audit_generator_distribution.py` | `--data-root`, `--verification-manifest`, optional `--decisions`, `--audit-seed 42` | audit selection/summary |
 | `validate_dataset.py` | `--data-root` plus one stage manifest; optional `--check-isolation` | sanitized validation report |
 | `run_fake_e2e.py` | `--data-root`, `--fixture-root` or `--split-manifest` | fake E2E summary |
 
 - [ ] **Step 1: Write failing parser/default/boundary tests**
 
-Assert every CLI imports without vLLM. `prepare_questions` requires one of the three subcommands: the two acquisition calls each create one immutable source manifest, and `build-split` refuses to run unless both referenced source manifests and artifact hashes validate. Split seed defaults to 42; ReClor has no archive argument in Phase 1; generation defaults to fake; `--backend vllm` exits with `PhaseBoundaryError` in Phase 1 before importing vLLM; stale-lock recovery requires the explicit flag; no CLI prints absolute paths or payload text; exit codes are 0 success, 2 contract/config error, 3 integrity error, 4 dependency/access error.
+Assert every CLI imports without vLLM. `prepare_questions` requires one of the three subcommands: the two acquisition calls each create one immutable source manifest, and `build-split` refuses to run unless both referenced source manifests and artifact hashes validate. Split seed defaults to 42; ReClor has no archive argument in Phase 1; generation defaults to fake; `--backend vllm` exits with `PhaseBoundaryError` in Phase 1 before importing vLLM; stale-lock recovery requires the explicit flag; trainer export requires all four named upstream manifests and refuses mismatched role bindings; no CLI prints absolute paths or payload text; exit codes are 0 success, 2 contract/config error, 3 integrity error, 4 dependency/access error.
 
 - [ ] **Step 2: Run focused tests and observe missing-script failures**
 
@@ -1262,7 +1406,7 @@ Provide 40 synthetic MATH and 40 synthetic ReClor source questions, each marked 
 
 - [ ] **Step 2: Write a failing full-flow test**
 
-The test runs 80-row source loading -> 90/10 split -> deterministic 20+20 train smoke selection -> 240 candidate planning -> interrupted fake generation -> resume -> verification -> audit selection with synthetic AGREE decisions -> pairs -> permutations -> gates. Assert 72 train and 8 held-out source questions overall, 40 selected smoke questions, 240 final successful composite keys, one pair maximum per question, two permutations per pair, equal semantic candidate-set hashes across interrupted and clean runs, stable downstream canonical pair/permutation hashes, and no production-only phase status. Physical generation-history manifest hashes may differ when retry history differs.
+The test runs 80-row source loading -> 90/10 split -> deterministic 20+20 train smoke selection -> 240 candidate planning -> interrupted fake generation -> resume -> verification -> audit selection with synthetic AGREE decisions -> pairs -> permutations -> gates, while the independent consumer branch exports trainer Parquet from the same pair/permutation records. Assert 72 train and 8 held-out source questions overall, 40 selected smoke questions, 240 final successful composite keys, one pair maximum per question, two permutations per pair, equal semantic candidate-set hashes across interrupted and clean runs, stable downstream canonical pair/permutation/export hashes, and no production-only phase status. Read the exported Parquet with `RLHFDataset` and pass one complete pair through the explicit identity/repeat/reward-extra flow. Physical generation-history manifest hashes may differ when retry history differs.
 
 - [ ] **Step 3: Run the test and observe missing orchestration behavior**
 
@@ -1270,11 +1414,11 @@ Run: `python -m pytest tests_permstudy/data_pipeline/test_fake_e2e.py -v`
 
 - [ ] **Step 4: Implement the orchestration using only package APIs**
 
-`run_fake_e2e.py` must not duplicate stage logic. It creates an external temporary root when `--data-root` is supplied by tests, writes private artifacts there, and prints only the sanitized summary.
+`run_fake_e2e.py` must not duplicate stage logic. It creates an external temporary root when `--data-root` is supplied by tests, writes private artifacts there, exports trainer Parquet through the Task 13A package API, and prints only the sanitized summary. Audit/gates use canonical records, not the Parquet output.
 
 - [ ] **Step 5: Verify Windows and WSL semantic hashes**
 
-Run the E2E in both environments and compare successful composite candidate keys, semantic candidate-set hashes, split hashes, and canonical pair/permutation hashes byte-for-byte. Do not require equality of physical execution-history manifests that contain different append/failure histories.
+Run the E2E in both environments and compare successful composite candidate keys, semantic candidate-set hashes, split hashes, canonical pair/permutation hashes, and the canonical trainer-row payload hash byte-for-byte. The Parquet artifact hash is also expected to match under the exact pinned dependency set; if platform metadata differs, fail and diagnose rather than weakening the manifest contract. Do not require equality of physical execution-history manifests that contain different append/failure histories.
 
 - [ ] **Step 6: Run full suite and commit**
 
@@ -1294,6 +1438,7 @@ git commit -m "test(data): add synthetic fake pipeline end to end"
 - Create: `artifacts/data_pipeline/phase1/environment.txt`
 - Create: `artifacts/data_pipeline/phase1/pytest_output.txt`
 - Create: `artifacts/data_pipeline/phase1/fake_e2e_summary.json`
+- Create: `artifacts/data_pipeline/phase1/trainer_export_summary.json`
 - Create: `artifacts/data_pipeline/phase1/private_source_summary.json`
 - Create: `artifacts/data_pipeline/phase1/git_data_scan.txt`
 - Modify: `scripts_permstudy/data/validate_dataset.py`
@@ -1320,11 +1465,15 @@ Do not echo or persist the resolved values. Confirm isolation with `validate_dat
 
 - [ ] **Step 2: Acquire real ReClor/MATH privately and build the split**
 
-Run `prepare_questions.py acquire-reclor` against the extracted official directory and confirm the private tree manifest hashes `train.json`, `val.json`, `test.json`, and `use_items.txt`, while only train rows become questions. Run `prepare_questions.py acquire-math` after resolving the immutable `EleutherAI/hendrycks_math` revision. Then run `prepare_questions.py build-split` with both immutable source manifests and `split_seed=42`. Confirm private manifests contain file/revision hashes, source counts, dedup counts, fallback level, and split hash; confirm public output contains counts/hashes only.
+Run `prepare_questions.py acquire-reclor` against the extracted official directory and confirm the private tree manifest hashes `train.json`, `val.json`, `test.json`, and `use_items.txt`, while only train rows become questions.
+
+For MATH, first resolve the requested ref once to an immutable 40-hex SHA without writing an acquisition artifact. Against that exact SHA and external cache, execute `datasets.get_dataset_config_names(repo_id, revision=sha)` and load one train row from one returned config with `datasets.load_dataset(repo_id, config, split="train", revision=sha, cache_dir=...)`. If either operation reports that the pinned revision is script-only/unsupported, stop Task 18 and propose an explicit source/dependency protocol revision. Do not switch to another commit, `refs/convert/parquet`, `data_files=`, or another `datasets` version within the same run.
+
+Only after the exact-SHA preflight passes, run `prepare_questions.py acquire-math` with the same SHA. Then run `prepare_questions.py build-split` with both immutable source manifests and `split_seed=42`. Confirm private manifests contain file/revision hashes, source counts, dedup counts, fallback level, and split hash; confirm public output contains counts/hashes only.
 
 - [ ] **Step 3: Run the private 40-question fake pipeline**
 
-Use the real private smoke question manifest with the fake backend; do not run vLLM. Complete an interrupted/resumed route and a clean route, requiring equal final successful composite keys and semantic candidate-set hashes but not equal physical failure-history manifests. Complete verification, synthetic audit decisions clearly labeled as Phase 1 plumbing-only, pair/permutation build, and gate calculation. Do not interpret fake-response Statistical Gate results as a real smoke result.
+Use the real private smoke question manifest with the fake backend; do not run vLLM. Complete an interrupted/resumed route and a clean route, requiring equal final successful composite keys and semantic candidate-set hashes but not equal physical failure-history manifests. Complete verification, synthetic audit decisions clearly labeled as Phase 1 plumbing-only, pair/permutation build, gate calculation, and trainer Parquet export. Load the export through `RLHFDataset` and the explicit identity/repeat/reward-extra path. Do not interpret fake-response Statistical Gate results as a real smoke result, and do not make audit/gate status depend on export success.
 
 - [ ] **Step 4: Run the complete Windows and WSL test matrix**
 
@@ -1350,7 +1499,7 @@ Tests seed one violation for each rule plus design/schema files containing the w
 
 - [ ] **Step 6: Write sanitized evidence**
 
-`private_source_summary.json` includes source revisions/file hashes, the ReClor tree-manifest hash, question counts, duplicate counts, selected stratification level, split hash, and fake-run counts. `fake_e2e_summary.json` includes run IDs, semantic candidate-set hash, sanitized artifact hashes, completion counts, candidate and question-level verification status counts, pair/permutation counts, and explicit `real_generation_performed=false`.
+`private_source_summary.json` includes source revisions/file hashes, the ReClor tree-manifest hash, question counts, duplicate counts, selected stratification level, split hash, and fake-run counts. `fake_e2e_summary.json` includes run IDs, semantic candidate-set hash, sanitized artifact hashes, completion counts, candidate and question-level verification status counts, pair/permutation counts, and explicit `real_generation_performed=false`. `trainer_export_summary.json` stays within the existing public-evidence allowlist: `run_ids.export` holds the export run ID; `artifact_hashes` holds role-tagged `upstream_split`, `upstream_generation`, `upstream_pairs`, `upstream_permutations`, `prompt_template`, and `parquet` hashes; `completion_counts.rows` holds row count; and `phase_status` records the explicit-identity round-trip result. It contains no prompt or response text.
 
 `README.md` states:
 
@@ -1388,6 +1537,6 @@ Run `git status --short`, `git diff --check main..HEAD`, and the full test suite
 
 ## Implementation Review Checkpoints
 
-Request a reviewer gate after Tasks 4, 7, 11, 15, 17, and 18. These boundaries correspond to durable storage, immutable source/split lineage, verifier correctness, gate correctness, complete synthetic behavior, and real-source Phase 1 acceptance.
+Request a reviewer gate after Tasks 4, 7, 11, 13A, 15, 17, and 18. These boundaries correspond to durable storage, immutable source/split lineage, verifier correctness, trainer compatibility, gate correctness, complete synthetic behavior, and real-source Phase 1 acceptance.
 
 No Task 18 success authorizes Phase 2 automatically. Phase 2 requires a separate approved execution plan for AutoDL, external caches, gated-model access, real vLLM generation, human audit, and real Functional/Statistical Gates.
