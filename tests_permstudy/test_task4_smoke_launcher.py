@@ -1,9 +1,9 @@
 """Tests for the Task 4 foreground, fail-fast real-GPU smoke launcher.
 
 The launcher is a Linux shell script executed on AutoDL, so these tests pin its
-contract two ways: textual guarantees that specific fixed settings can never be
-dropped, and a real Hydra composition that proves every override the launcher
-passes actually resolves against the repository's `ppo_trainer` config.
+contract three ways: textual guarantees for the fixed PASS settings, textual
+guarantees that every precondition is executed fail-closed, and a real Hydra
+composition proving every override the launcher passes actually resolves.
 """
 
 from __future__ import annotations
@@ -19,19 +19,117 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = REPO_ROOT / "scripts" / "run_task4_real_gpu_smoke.sh"
 
 OVERRIDE_BLOCK = re.compile(r"TRAINER_OVERRIDES=\(\n(.*?)\n\)\n", re.S)
+TRAINER_INVOCATION = 'python -m verl.trainer.main_ppo "${TRAINER_OVERRIDES[@]}"'
 
-# Values only ever set at runtime on the GPU host; replaced with inert paths for composition.
-SUBSTITUTIONS = {
-    "${TASK4_RUN_DIR}": "/tmp/task4_run_001",
-    "${TASK4_RUN_ID}": "task4_run_001",
-    "${TINY_DATASET}": "/tmp/task4_tiny_8pairs.parquet",
-    "${MODEL_PATH}": "/tmp/Qwen3-8B",
-    "${PROJECT_ROOT}": REPO_ROOT.as_posix(),
-    "$TASK4_RUN_DIR": "/tmp/task4_run_001",
-    "$TASK4_RUN_ID": "task4_run_001",
-    "$TINY_DATASET": "/tmp/task4_tiny_8pairs.parquet",
-    "$MODEL_PATH": "/tmp/Qwen3-8B",
-    "$PROJECT_ROOT": REPO_ROOT.as_posix(),
+# Values only ever set at runtime on the GPU host; substituted while emulating bash.
+RUNTIME_VALUES = {
+    "TASK4_RUN_DIR": "/tmp/task4_run_001",
+    "TASK4_RUN_ID": "task4_run_001",
+    "TINY_DATASET": "/tmp/task4_tiny_8pairs.parquet",
+    "MODEL_PATH": "/tmp/Qwen3-8B",
+    "PROJECT_ROOT": REPO_ROOT.as_posix(),
+}
+_VARIABLE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+
+
+def bash_word(line: str) -> str:
+    """Emulate bash quote removal plus expansion for one array element.
+
+    The launcher relies on real bash semantics: `data.train_files="$TINY_DATASET"`
+    contributes one argv element with no quotes, while
+    `trainer.logger='["console","tensorboard"]'` keeps its inner double quotes.
+    """
+    out: list[str] = []
+    index = 0
+    in_single = False
+    in_double = False
+    while index < len(line):
+        char = line[index]
+        if in_single:
+            if char == "'":
+                in_single = False
+            else:
+                out.append(char)
+            index += 1
+            continue
+        if char == "'" and not in_double:
+            in_single = True
+            index += 1
+            continue
+        if char == '"':
+            in_double = not in_double
+            index += 1
+            continue
+        match = _VARIABLE.match(line, index)
+        if match:
+            name = match.group(1)
+            assert name in RUNTIME_VALUES, f"unknown variable in override: {name}"
+            out.append(RUNTIME_VALUES[name])
+            index = match.end()
+            continue
+        out.append(char)
+        index += 1
+    assert not in_single and not in_double, f"unbalanced quotes in override: {line}"
+    return "".join(out).strip()
+
+EXPECTED_OVERRIDES = {
+    "algorithm.adv_estimator=grpo",
+    "algorithm.use_kl_in_reward=false",
+    "grouping.identity_mode=explicit",
+    "data.train_files=/tmp/task4_tiny_8pairs.parquet",
+    "data.val_files=/tmp/task4_tiny_8pairs.parquet",
+    "data.train_batch_size=16",
+    "data.max_prompt_length=4096",
+    "data.max_response_length=256",
+    "data.filter_overlong_prompts=false",
+    "data.truncation=error",
+    "data.shuffle=false",
+    "actor_rollout_ref.model.path=/tmp/Qwen3-8B",
+    "actor_rollout_ref.model.tokenizer_path=/tmp/Qwen3-8B",
+    "actor_rollout_ref.model.lora_rank=32",
+    "actor_rollout_ref.model.lora_alpha=64",
+    "actor_rollout_ref.model.target_modules=all-linear",
+    "actor_rollout_ref.model.enable_gradient_checkpointing=true",
+    "actor_rollout_ref.actor.strategy=fsdp2",
+    "actor_rollout_ref.actor.optim.lr=1e-5",
+    "actor_rollout_ref.actor.ppo_mini_batch_size=16",
+    "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1",
+    "actor_rollout_ref.actor.use_kl_loss=true",
+    "actor_rollout_ref.actor.kl_loss_coef=0.001",
+    "actor_rollout_ref.actor.kl_loss_type=low_var_kl",
+    "actor_rollout_ref.rollout.name=vllm",
+    "actor_rollout_ref.rollout.mode=sync",
+    "actor_rollout_ref.rollout.n=2",
+    "actor_rollout_ref.rollout.temperature=1.0",
+    "actor_rollout_ref.rollout.top_p=1.0",
+    "actor_rollout_ref.rollout.tensor_model_parallel_size=1",
+    "actor_rollout_ref.rollout.gpu_memory_utilization=0.50",
+    "actor_rollout_ref.rollout.enforce_eager=true",
+    "actor_rollout_ref.rollout.max_num_seqs=32",
+    "actor_rollout_ref.rollout.max_model_len=4352",
+    "actor_rollout_ref.rollout.max_num_batched_tokens=8192",
+    "actor_rollout_ref.rollout.load_format=safetensors",
+    "actor_rollout_ref.rollout.layered_summon=true",
+    "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1",
+    "actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1",
+    "actor_rollout_ref.ref.fsdp_config.param_offload=true",
+    "trainer.balance_batch=true",
+    "trainer.n_gpus_per_node=1",
+    "trainer.nnodes=1",
+    "trainer.total_epochs=2",
+    "trainer.total_training_steps=2",
+    "trainer.save_freq=1",
+    "trainer.test_freq=-1",
+    "trainer.val_before_train=false",
+    "trainer.resume_mode=disable",
+    'trainer.logger=["console","tensorboard"]',
+    "trainer.project_name=task4_real_gpu_smoke",
+    "trainer.experiment_name=task4_run_001",
+    "trainer.rollout_data_dir=/tmp/task4_run_001/rollouts",
+    "trainer.default_local_dir=/tmp/task4_run_001/checkpoints",
+    "reward_model.reward_manager=batch",
+    f"custom_reward_function.path={REPO_ROOT.as_posix()}/my_reward/judge_qwen.py",
+    "custom_reward_function.name=compute_score",
 }
 
 
@@ -49,12 +147,9 @@ def extract_overrides() -> list[str]:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if len(line) >= 2 and line[0] == line[-1] and line[0] in "\"'":
-            line = line[1:-1]
-        for source, replacement in SUBSTITUTIONS.items():
-            line = line.replace(source, replacement)
-        assert "$" not in line, f"unsubstituted variable left in override: {line}"
-        overrides.append(line)
+        expanded = bash_word(line)
+        assert "$" not in expanded, f"unsubstituted variable left in override: {expanded}"
+        overrides.append(expanded)
     return overrides
 
 
@@ -75,23 +170,13 @@ def test_launcher_requires_every_run_input():
         assert f"${{{name}:?" in text, f"launcher must fail fast when {name} is unset"
 
 
-def test_launcher_refuses_a_run_dir_with_prior_evidence():
-    text = launcher_text()
-    assert "TASK4_RUN_DIR" in text
-    assert "refus" in text.lower()
-    assert re.search(r"ls -A\s+\"?\$TASK4_RUN_DIR", text), "launcher must detect prior evidence in the run dir"
-
-
-def test_launcher_creates_the_run_dir_before_writing_evidence():
-    text = launcher_text()
-    assert text.index("mkdir -p \"$TASK4_RUN_DIR\"") < text.index("reward_log_window.json")
-
-
 def test_launcher_preserves_the_trainer_exit_code():
     text = launcher_text()
     assert "set -o pipefail" in text
     assert "PIPESTATUS[0]" in text
-    assert re.search(r"exit\s+\"?\$\{?TRAINER", text), "launcher must exit with the trainer's own status"
+    assert re.search(r"^\s*exit\s+\"?\$TRAINER_STATUS\"?\s*$", text, re.M), (
+        "launcher must exit with the trainer's own status"
+    )
 
 
 def test_launcher_captures_train_log_and_keeps_running_in_the_foreground():
@@ -100,12 +185,66 @@ def test_launcher_captures_train_log_and_keeps_running_in_the_foreground():
     assert "tee" in text
 
 
-def test_provenance_capture_cannot_abort_the_run_before_training():
-    """A failing git/pip/python probe must be recorded, not kill the GPU run.
+def test_launcher_refuses_to_report_success_without_captured_train_log():
+    """An unchecked `tee` failure would report a clean run with no evidence."""
+    text = launcher_text()
+    assert re.search(r'if \[ ! -s "\$TASK4_RUN_DIR/train\.log" \]', text), (
+        "launcher must verify train.log was actually written before reporting success"
+    )
+    assert text.count("train.log") >= 3
 
-    Regression: under `set -e`, `git rev-parse HEAD` returning non-zero (for
-    example git's safe.directory refusal) aborted the launcher before the
-    trainer command was even written, masking the real exit status.
+
+# ---------------------------------------------------------------------------
+# precondition ordering and fail-closed guards
+# ---------------------------------------------------------------------------
+
+
+def test_run_dir_reuse_guard_is_fail_closed():
+    """Being unable to list the run dir must never be read as 'empty'."""
+    text = launcher_text()
+    assert re.search(r'if ! entries="\$\(ls -A "\$TASK4_RUN_DIR"\)"', text), (
+        "the emptiness probe must be checked, not silenced with `|| true`"
+    )
+    guard = text[text.index("if [ -e \"$TASK4_RUN_DIR\" ]") : text.index("cd \"$PROJECT_ROOT\"")]
+    assert "2>/dev/null" not in guard, "the reuse guard must not swallow listing failures"
+    assert guard.count("exit 2") >= 3, "refusal, non-directory and unlistable cases must all exit 2"
+
+
+def test_reward_log_readability_is_a_precondition_not_a_mid_run_abort():
+    text = launcher_text()
+    assert re.search(r'if \[ -e "\$REWARD_LOG" \] && \[ ! -r "\$REWARD_LOG" \]', text), (
+        "an unreadable reward log must be refused up front"
+    )
+    assert 'if ! REWARD_LOG_START_BYTES="$(wc -c < "$REWARD_LOG"' in text, (
+        "the reward-log sizing probe must not abort the run through `set -e`"
+    )
+
+
+def test_run_dir_is_created_only_after_every_precondition():
+    text = launcher_text()
+    creation = text.index('mkdir -p "$TASK4_RUN_DIR"')
+    for precondition in (
+        'if [ -e "$TASK4_RUN_DIR" ]',
+        'if [ -e "$REWARD_LOG" ] && [ ! -r "$REWARD_LOG" ]',
+        "RESOLVED_CONFIG_TMP=",
+    ):
+        assert text.index(precondition) < creation, f"{precondition} must run before the run dir exists"
+
+
+def test_launcher_writes_the_resolved_hydra_config_into_the_run_dir():
+    text = launcher_text()
+    assert "resolved_config.yaml" in text
+    assert "OmegaConf.to_yaml" in text
+    assert text.index("resolved_config.yaml") < text.index(TRAINER_INVOCATION)
+
+
+def test_provenance_capture_cannot_abort_the_run_before_training():
+    """Every pre-trainer probe in the launcher must tolerate its own failure.
+
+    Regression: under `set -e`, failing probes (`git rev-parse HEAD` returning
+    non-zero via git's safe.directory refusal, a `wc` that cannot read the reward
+    log) aborted the launcher before the trainer started and reported a status
+    that was indistinguishable from a trainer failure.
     """
     text = launcher_text()
     blocks = {
@@ -126,6 +265,29 @@ def test_provenance_capture_cannot_abort_the_run_before_training():
                     f"{name} probe can abort the run under `set -e` before the trainer starts: {line}"
                 )
     assert checked >= 4, f"expected to inspect several probes, saw {checked}"
+
+    # Probes outside those blocks are covered by the other guarded forms.
+    assert 'PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"' in text
+    assert 'if ! entries="$(ls -A "$TASK4_RUN_DIR")"' in text
+    assert 'if ! REWARD_LOG_START_BYTES="$(wc -c < "$REWARD_LOG"' in text
+
+
+def test_launcher_creates_the_run_dir_before_writing_evidence():
+    text = launcher_text()
+    assert text.index('mkdir -p "$TASK4_RUN_DIR"') < text.index("reward_log_window.json")
+
+
+def test_launcher_records_the_reward_log_window_before_the_trainer_starts():
+    text = launcher_text()
+    assert text.index("reward_log_window.json") < text.index(TRAINER_INVOCATION), (
+        "reward-log window must be recorded before the trainer invocation"
+    )
+    assert "judge_qwen3_8b.log" in text
+    assert "start_offset_bytes" in text
+
+
+def test_launcher_creates_the_run_dir_even_when_it_is_absent():
+    assert 'mkdir -p "$TASK4_RUN_DIR"' in launcher_text()
 
 
 # ---------------------------------------------------------------------------
@@ -156,31 +318,12 @@ def test_launcher_isolates_tensorboard_per_run():
     assert "export TENSORBOARD_DIR" in text
 
 
-def test_launcher_records_the_reward_log_window_before_training():
-    text = launcher_text()
-    offset = text.index("reward_log_window.json")
-    assert offset < text.index("main_ppo"), "reward-log window must be recorded before the trainer starts"
-    assert "judge_qwen3_8b.log" in text
-    assert "start_offset_bytes" in text
-
-
-def test_launcher_keeps_the_required_rollout_and_reward_overrides():
+def test_launcher_pins_every_override_value():
+    """Every override value is part of the PASS contract, not just the headline ones."""
     overrides = extract_overrides()
-    joined = "\n".join(overrides)
-    for required in (
-        "data.filter_overlong_prompts=false",
-        "data.truncation=error",
-        "data.shuffle=false",
-        "trainer.balance_batch=true",
-        "trainer.val_before_train=false",
-        "trainer.resume_mode=disable",
-        "trainer.test_freq=-1",
-        "actor_rollout_ref.actor.strategy=fsdp2",
-        "actor_rollout_ref.model.target_modules=all-linear",
-        "reward_model.reward_manager=batch",
-        "custom_reward_function.name=compute_score",
-    ):
-        assert required in joined, f"missing required override: {required}"
+    assert len(overrides) == 57, f"expected 57 overrides, found {len(overrides)}"
+    assert len(set(overrides)) == 57, "override list contains duplicates"
+    assert set(overrides) == EXPECTED_OVERRIDES
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +333,6 @@ def test_launcher_keeps_the_required_rollout_and_reward_overrides():
 
 @pytest.mark.skipif(importlib.util.find_spec("hydra") is None, reason="requires hydra-core")
 def test_every_launcher_override_resolves_and_forces_explicit_identity():
-    import hydra
     from hydra import compose, initialize_config_dir
     from hydra.core.global_hydra import GlobalHydra
     from omegaconf import OmegaConf
@@ -210,4 +352,3 @@ def test_every_launcher_override_resolves_and_forces_explicit_identity():
     assert cfg.grouping.identity_mode == "explicit"
     for key in key_overrides:
         assert OmegaConf.select(cfg, key) is not None, f"launcher override does not resolve: {key}"
-    assert hydra.__version__
