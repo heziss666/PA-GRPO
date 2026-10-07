@@ -78,6 +78,15 @@ class ShardLock:
         staleness is only meaningful when the pid is the acquiring process's.
         Recovery needs all three of ``recover_stale=True``, matching run/shard
         identity, and a pid that ``psutil`` reports as dead.
+
+        Before removing a stale lock, recovery re-reads it and refuses to proceed
+        unless its bytes are identical to the lock it just validated. That
+        narrows the recover-versus-recover race, but it does not close it: the
+        mandated ``O_CREAT|O_EXCL`` plus ``psutil`` primitives expose no atomic
+        compare-and-delete, so two recoverers can still interleave between this
+        re-read and the unlink, and each can end up holding the shard. Stale-lock
+        recovery is therefore an explicit single-operator action: two recoverers
+        must never run against one shard concurrently.
         """
         identity = _lock_identity(metadata)
         path = Path(lock_path)
@@ -90,14 +99,24 @@ class ShardLock:
                 if not recover_stale:
                     raise LockError("shard lock is held by another process") from exc
                 try:
-                    recorded = _read_lock(path)
+                    stale = path.read_bytes()
                 except FileNotFoundError:
                     # The holder released it between the create and the read.
                     continue
+                recorded = _parse_lock(stale)
                 if identity["run_id"] != recorded["run_id"] or identity["shard_id"] != recorded["shard_id"]:
                     raise LockError("shard lock belongs to a different run or shard") from exc
                 if pid_exists(recorded["pid"]):
                     raise LockError("shard lock is held by a live process") from exc
+                # Never remove a lock whose bytes are not the ones just validated:
+                # a recoverer that lost the race must fail loudly instead of
+                # deleting another process's fresh lock.
+                try:
+                    current = path.read_bytes()
+                except FileNotFoundError as missing:
+                    raise LockError("shard lock changed during recovery") from missing
+                if current != stale:
+                    raise LockError("shard lock changed during recovery")
                 _discard(path)
                 continue
             try:
@@ -331,7 +350,11 @@ def _lock_identity(metadata) -> dict[str, str]:
 
 def _read_lock(lock_path: Path) -> dict[str, object]:
     """Read a lock file, rejecting anything that does not match the contract."""
-    raw = lock_path.read_bytes()
+    return _parse_lock(lock_path.read_bytes())
+
+
+def _parse_lock(raw: bytes) -> dict[str, object]:
+    """Validate exact lock envelope bytes against the lock contract."""
     try:
         envelope = json.loads(raw.decode("utf-8"), object_pairs_hook=_object_pairs, parse_constant=_reject_constant)
     except (UnicodeDecodeError, ValueError) as exc:

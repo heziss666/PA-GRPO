@@ -604,6 +604,40 @@ def test_lock_recovery_refuses_a_pid_that_psutil_reports_alive(tmp_path, monkeyp
     assert lock_path.read_bytes() == before
 
 
+def test_lock_recovery_aborts_when_a_competing_recoverer_replaces_the_lock(tmp_path, monkeypatch):
+    io = load_io()
+    lock_path, payload = stale_lock(tmp_path)
+    competing = canonical_json_bytes({
+        **payload, "host": socket.gethostname(), "pid": os.getpid(),
+        "created_at": "2026-10-06T00:00:01.000000Z",
+    })
+
+    def racing_pid_exists(pid):
+        # A competing recoverer wins the race right after our dead-PID check.
+        assert pid == payload["pid"]
+        lock_path.write_bytes(competing)
+        return False
+
+    monkeypatch.setattr(io, "pid_exists", racing_pid_exists)
+    with pytest.raises(io.LockError, match="changed during recovery"):
+        io.ShardLock.acquire(lock_path, {"run_id": "run-1", "shard_id": "shard-0"}, recover_stale=True)
+    assert lock_path.read_bytes() == competing
+
+
+def test_lock_recovery_aborts_when_the_validated_lock_disappears(tmp_path, monkeypatch):
+    io = load_io()
+    lock_path, _ = stale_lock(tmp_path)
+
+    def vanishing_pid_exists(pid):
+        lock_path.unlink()
+        return False
+
+    monkeypatch.setattr(io, "pid_exists", vanishing_pid_exists)
+    with pytest.raises(io.LockError, match="changed during recovery"):
+        io.ShardLock.acquire(lock_path, {"run_id": "run-1", "shard_id": "shard-0"}, recover_stale=True)
+    assert not lock_path.exists()
+
+
 def test_failed_lock_write_does_not_leave_a_poison_lock(tmp_path, monkeypatch):
     io = load_io()
     lock_path = tmp_path / "shard-0.lock"
