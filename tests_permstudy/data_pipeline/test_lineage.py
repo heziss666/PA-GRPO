@@ -42,6 +42,30 @@ def test_role_bound_config_has_literal_canonical_shape_and_copies_inputs():
     assert config["upstream_bindings"]["math_questions"] == MATH_HASH
 
 
+def test_role_bound_config_deeply_snapshots_nested_parameters():
+    parameters = {
+        "sampling": {
+            "temperature": 1.0,
+            "stop": ["Final Answer:"],
+        }
+    }
+
+    config = role_bound_stage_config(
+        parameters,
+        {"math_questions": MATH_HASH, "reclor_questions": RECLOR_HASH},
+        ROLES,
+    )
+    parameters["sampling"]["temperature"] = 0.7
+    parameters["sampling"]["stop"].append("changed")
+
+    assert config["parameters"] == {
+        "sampling": {
+            "temperature": 1.0,
+            "stop": ["Final Answer:"],
+        }
+    }
+
+
 def test_binding_insertion_order_does_not_change_run_id():
     first = role_bound_stage_config(
         {"split_seed": 42},

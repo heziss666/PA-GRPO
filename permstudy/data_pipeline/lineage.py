@@ -1,6 +1,7 @@
 """Role-tagged immutable-manifest bindings for downstream stage configs."""
 
 from collections.abc import Collection, Mapping
+from copy import deepcopy
 import re
 
 
@@ -33,6 +34,6 @@ def role_bound_stage_config(
 
     return {
         "lineage_schema": LINEAGE_SCHEMA,
-        "parameters": dict(parameters),
+        "parameters": deepcopy(dict(parameters)),
         "upstream_bindings": {role: upstream_bindings[role] for role in sorted(upstream_bindings)},
     }

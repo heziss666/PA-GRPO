@@ -208,7 +208,7 @@ split_seed = 42
 - ReClor stratifies by the official gold label.
 - Official ReClor validation and test sets are excluded.
 
-The split manifest uses canonical UTF-8 JSONL, LF line endings, sorted keys, and records sorted by question ID. It records source revisions or source file hashes, normalization version, split algorithm, seed, and any stratification fallback. Its SHA256 is the `split_manifest_hash`.
+The split manifest uses canonical UTF-8 JSONL with sorted keys and exactly one LF after every record. The first record is `record_type="split_metadata"`; it records the schema version, `split_algorithm="deterministic_stratified_question_split_v1"`, per-source question-normalization versions, source revisions/snapshot identities, seed, selected stratification levels, and fallback reasons. Every remaining record is `record_type="split_assignment"`, contains one `SplitAssignment`, and is sorted by `original_question_id`. The SHA256 of these exact persisted bytes is the `split_manifest_hash`; later CLI persistence must call the same package renderer rather than reconstructing the payload independently.
 
 Every downstream run binds all three values:
 

@@ -800,6 +800,7 @@ git commit -m "feat(data): acquire immutable MATH train snapshot"
 **Interfaces:**
 - Produces: `role_bound_stage_config(parameters: Mapping[str, object], upstream_bindings: Mapping[str, str], allowed_roles: Collection[str]) -> dict[str, object]`.
 - Produces: `build_internal_split(questions, split_seed=42) -> SplitBuildResult`.
+- Produces: `split_manifest_bytes(questions, result, split_seed=42) -> bytes`, the only renderer Task 16 may persist for the split manifest.
 - Produces: `select_smoke_questions(assignments, per_source=20, split_seed=42) -> list[SplitAssignment]`.
 
 - [ ] **Step 1: Write failing role-bound lineage tests**
@@ -817,12 +818,12 @@ Return exactly:
 ```python
 {
     "lineage_schema": "role_tagged_upstream_v1",
-    "parameters": dict(parameters),
+    "parameters": deepcopy(dict(parameters)),
     "upstream_bindings": {role: upstream_bindings[role] for role in sorted(upstream_bindings)},
 }
 ```
 
-Validate exact role-set equality against `allowed_roles`, identifier-like nonempty role names, and lowercase 64-hex manifest hashes. The split stage calls it with roles `math_questions` and `reclor_questions`; all later tasks use their own exact allowed role set.
+Validate exact role-set equality against `allowed_roles`, identifier-like nonempty role names, and lowercase 64-hex manifest hashes. Deeply snapshot parameters so later caller mutation cannot change a completed typed config. The split stage calls it with roles `math_questions` and `reclor_questions`; all later tasks use their own exact allowed role set.
 
 - [ ] **Step 4: Write failing determinism and leakage tests**
 
@@ -842,9 +843,11 @@ Smoke selection uses a separate proportional allocator because 20 samples may be
 
 The split run config is built with `role_bound_stage_config` and the exact source-manifest bindings. Its manifest stores the sorted binding values in `upstream_manifest_hashes`. The split stage must reject source artifacts whose verified manifest hashes do not equal their named bindings before writing assignments.
 
+`split_manifest_bytes()` is the authoritative canonical JSONL renderer. Its first LF-terminated line is a `split_metadata` record containing `split_manifest_v1`, `deterministic_stratified_question_split_v1`, explicit per-source `question_normalization_v1` identifiers, source provenance, seed, stratification levels, and fallback reasons. Each following LF-terminated line is one `split_assignment` record, ordered by `original_question_id`. `split_manifest_hash` is SHA256 over those exact bytes. Task 16 must persist the bytes returned by this function and must not independently rebuild equivalent-looking JSON.
+
 - [ ] **Step 7: Add a golden cross-platform hash test**
 
-For the committed synthetic fixture, assert a literal expected `split_manifest_hash`. Run the same test on Windows and WSL; do not update the literal independently per platform.
+For the programmatically constructed synthetic Task 7 unit baseline, assert a literal expected `split_manifest_hash` and run the same test on Windows and WSL; do not update the literal independently per platform. This is a serializer/algorithm unit golden, not the committed-source-fixture acquisition-to-split proof. Task 17 owns the latter cross-platform fake-E2E assertion.
 
 - [ ] **Step 8: Run focused/full tests and commit**
 

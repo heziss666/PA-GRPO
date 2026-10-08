@@ -22,7 +22,7 @@ from permstudy.data_pipeline.io import append_record, scan_jsonl, write_atomic_m
 from permstudy.data_pipeline.sources import SourceSnapshot
 
 
-EXPECTED_BASELINE_SPLIT_HASH = "224b11946af34f2e4277bc410fd4eaa9d153f799d2567bf71468090f1cc69bf7"
+EXPECTED_BASELINE_SPLIT_HASH = "08aaa028fcb859df62a792be1b79c4c74bbbdb7a17a883202719f16ec2885bf1"
 
 
 def digest(value: str) -> str:
@@ -124,6 +124,7 @@ def source_snapshots(tmp_path):
             "source": source.value,
             "source_revision": questions[0].source_revision,
             "source_snapshot_id": questions[0].source_snapshot_id,
+            "question_normalization_version": "question_normalization_v1",
         }
         manifest_path = tmp_path / f"sources/{source.value}/manifest.json"
         manifest_hash = write_atomic_manifest(manifest_path, payload)
@@ -224,6 +225,27 @@ def test_bound_split_rejects_artifact_tampering(tmp_path):
         module.build_bound_internal_split(snapshots, bindings, tmp_path)
 
 
+def test_bound_split_rejects_a_different_question_normalization_contract(tmp_path):
+    module = splitting_module()
+    snapshots, bindings = source_snapshots(tmp_path)
+    math = snapshots["math_questions"]
+    payload = {
+        key: value
+        for key, value in math.private_manifest.items()
+        if key not in {"created_at_utc", "output_manifest_hash"}
+    }
+    payload["question_normalization_version"] = "question_normalization_v2"
+    manifest_path = tmp_path / "sources/math/manifest-v2.json"
+    bindings["math_questions"] = write_atomic_manifest(manifest_path, payload)
+    snapshots["math_questions"] = replace(
+        math,
+        private_manifest=json.loads(manifest_path.read_text(encoding="utf-8")),
+    )
+
+    with pytest.raises(ValueError, match="normalization"):
+        module.build_bound_internal_split(snapshots, bindings, tmp_path)
+
+
 def test_split_result_metadata_is_an_immutable_snapshot():
     result = build(baseline_questions())
     assert isinstance(result.stratification_level_by_source, MappingProxyType)
@@ -320,6 +342,64 @@ def test_smoke_quota_is_proportional_for_unequal_train_strata():
 def test_split_manifest_hash_is_literal_and_cross_platform_stable():
     result = build(baseline_questions())
     assert result.split_manifest_hash == EXPECTED_BASELINE_SPLIT_HASH
+
+
+def test_split_manifest_hash_covers_exact_canonical_jsonl_bytes():
+    module = splitting_module()
+    questions = baseline_questions()
+    result = build(questions)
+
+    manifest_bytes = module.split_manifest_bytes(questions, result, split_seed=42)
+    lines = manifest_bytes.splitlines(keepends=True)
+    metadata = json.loads(lines[0])
+    assignments = [json.loads(line) for line in lines[1:]]
+
+    assert hashlib.sha256(manifest_bytes).hexdigest() == result.split_manifest_hash
+    assert manifest_bytes.endswith(b"\n")
+    assert b"\r" not in manifest_bytes
+    assert all(line.endswith(b"\n") for line in lines)
+    assert metadata == {
+        "fallback_reasons": {},
+        "question_normalization_versions": {
+            "math": "question_normalization_v1",
+            "reclor": "question_normalization_v1",
+        },
+        "record_type": "split_metadata",
+        "schema_version": "split_manifest_v1",
+        "source_provenance": {
+            "math": {
+                "source_revision": "a" * 40,
+                "source_snapshot_id": "math_snapshot",
+            },
+            "reclor": {
+                "source_revision": "reclor_revision",
+                "source_snapshot_id": "reclor_snapshot",
+            },
+        },
+        "split_algorithm": "deterministic_stratified_question_split_v1",
+        "split_seed": 42,
+        "stratification_level_by_source": {
+            "math": "category+level",
+            "reclor": "gold_label",
+        },
+    }
+    assert len(assignments) == 80
+    assert [row["original_question_id"] for row in assignments] == sorted(
+        row["original_question_id"] for row in assignments
+    )
+    assert all(row["record_type"] == "split_assignment" for row in assignments)
+
+
+def test_split_manifest_bytes_are_input_order_invariant():
+    module = splitting_module()
+    questions = baseline_questions()
+    result = build(questions)
+
+    assert module.split_manifest_bytes(questions, result, split_seed=42) == module.split_manifest_bytes(
+        reversed(questions),
+        result,
+        split_seed=42,
+    )
 
 
 def test_smoke_selection_is_deterministic_train_only_and_proportional():

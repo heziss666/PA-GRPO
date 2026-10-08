@@ -12,9 +12,18 @@ from .io import IntegrityError, scan_jsonl, verify_artifact_ref
 from .lineage import role_bound_stage_config
 from .schema import ArtifactRef, QuestionRecord, Source, Split, SplitAssignment
 from .sources import SourceSnapshot
+from .sources.math import NORMALIZATION_VERSION as MATH_NORMALIZATION_VERSION
+from .sources.reclor import NORMALIZATION_VERSION as RECLOR_NORMALIZATION_VERSION
 
 
 SPLIT_SCHEMA = "split_manifest_v1"
+SPLIT_ALGORITHM = "deterministic_stratified_question_split_v1"
+QUESTION_NORMALIZATION_VERSIONS = MappingProxyType(
+    {
+        Source.MATH.value: MATH_NORMALIZATION_VERSION,
+        Source.RECLOR.value: RECLOR_NORMALIZATION_VERSION,
+    }
+)
 
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _SOURCE_BY_ROLE = {
@@ -95,6 +104,8 @@ def build_bound_internal_split(
             or manifest.get("source_snapshot_id") != snapshot.source_snapshot_id
         ):
             raise ValueError("source manifest lineage mismatch")
+        if manifest.get("question_normalization_version") != QUESTION_NORMALIZATION_VERSIONS[snapshot.source.value]:
+            raise ValueError("source normalization contract mismatch")
 
         artifacts = manifest.get("artifacts")
         counts = manifest.get("counts")
@@ -125,6 +136,93 @@ def build_bound_internal_split(
 def _score(seed: int, question_id: str, *, smoke: bool = False) -> str:
     marker = "\0smoke\0" if smoke else "\0"
     return hashlib.sha256(f"{seed}{marker}{question_id}".encode("utf-8")).hexdigest()
+
+
+def _canonical_split_manifest_bytes(
+    assignments: Sequence[SplitAssignment],
+    provenance_by_source: Mapping[Source, tuple[str, str]],
+    levels: Mapping[str, str],
+    reasons: Mapping[str, tuple[str, ...]],
+    split_seed: int,
+) -> bytes:
+    metadata = {
+        "fallback_reasons": dict(reasons),
+        "question_normalization_versions": dict(QUESTION_NORMALIZATION_VERSIONS),
+        "record_type": "split_metadata",
+        "schema_version": SPLIT_SCHEMA,
+        "source_provenance": {
+            source.value: {
+                "source_revision": provenance_by_source[source][0],
+                "source_snapshot_id": provenance_by_source[source][1],
+            }
+            for source in sorted(Source, key=lambda item: item.value)
+        },
+        "split_algorithm": SPLIT_ALGORITHM,
+        "split_seed": split_seed,
+        "stratification_level_by_source": dict(levels),
+    }
+    rows = (
+        {"record_type": "split_assignment", **assignment.to_dict()}
+        for assignment in sorted(assignments, key=lambda item: item.original_question_id)
+    )
+    return canonical_json_bytes(metadata) + b"\n" + b"".join(
+        canonical_json_bytes(row) + b"\n" for row in rows
+    )
+
+
+def split_manifest_bytes(
+    questions: Iterable[QuestionRecord],
+    result: SplitBuildResult,
+    split_seed: int = 42,
+) -> bytes:
+    """Render the exact canonical JSONL bytes whose digest is the split identity."""
+    if not isinstance(result, SplitBuildResult):
+        raise TypeError("result must be a SplitBuildResult")
+    if type(split_seed) is not int or split_seed < 0:
+        raise ValueError("split_seed must be a nonnegative integer")
+
+    records = list(questions)
+    questions_by_id: dict[str, QuestionRecord] = {}
+    provenance_by_source: dict[Source, tuple[str, str]] = {}
+    for question in records:
+        if not isinstance(question, QuestionRecord):
+            raise TypeError("questions must contain QuestionRecord values")
+        question.validate()
+        if question.original_question_id in questions_by_id:
+            raise ValueError("duplicate original_question_id in split manifest input")
+        provenance = (question.source_revision, question.source_snapshot_id)
+        previous = provenance_by_source.setdefault(question.source, provenance)
+        if previous != provenance:
+            raise ValueError("source provenance mismatch in split manifest input")
+        questions_by_id[question.original_question_id] = question
+    if set(provenance_by_source) != set(Source):
+        raise ValueError("split manifest input must contain both MATH and ReClor")
+
+    assignment_ids: set[str] = set()
+    for assignment in result.assignments:
+        assignment.validate()
+        question = questions_by_id.get(assignment.original_question_id)
+        if (
+            question is None
+            or assignment.original_question_id in assignment_ids
+            or assignment.question_content_hash != question.question_content_hash
+            or assignment.source is not question.source
+        ):
+            raise ValueError("split manifest assignments do not match their questions")
+        assignment_ids.add(assignment.original_question_id)
+    if assignment_ids != set(questions_by_id):
+        raise ValueError("split manifest assignments do not match their questions")
+
+    payload = _canonical_split_manifest_bytes(
+        result.assignments,
+        provenance_by_source,
+        result.stratification_level_by_source,
+        result.fallback_reasons,
+        split_seed,
+    )
+    if sha256_hex(payload) != result.split_manifest_hash:
+        raise ValueError("split manifest bytes do not match split_manifest_hash")
+    return payload
 
 
 def _holdout_count(total: int) -> int:
@@ -266,25 +364,18 @@ def build_internal_split(questions: Iterable[QuestionRecord], split_seed: int = 
             assignments.append(assignment)
 
     ordered = tuple(sorted(assignments, key=lambda assignment: assignment.original_question_id))
-    payload = {
-        "assignments": [assignment.to_dict() for assignment in ordered],
-        "fallback_reasons": reasons,
-        "schema": SPLIT_SCHEMA,
-        "source_provenance": {
-            source.value: {
-                "source_revision": provenance_by_source[source][0],
-                "source_snapshot_id": provenance_by_source[source][1],
-            }
-            for source in sorted(Source, key=lambda item: item.value)
-        },
-        "split_seed": split_seed,
-        "stratification_level_by_source": levels,
-    }
+    manifest_bytes = _canonical_split_manifest_bytes(
+        ordered,
+        provenance_by_source,
+        levels,
+        reasons,
+        split_seed,
+    )
     return SplitBuildResult(
         assignments=ordered,
         stratification_level_by_source=levels,
         fallback_reasons=reasons,
-        split_manifest_hash=sha256_hex(canonical_json_bytes(payload)),
+        split_manifest_hash=sha256_hex(manifest_bytes),
     )
 
 
