@@ -16,6 +16,7 @@ from ..schema import CandidatePlan, CandidateRecord, FailureRecord
 from .base import (
     GenerationBackend,
     GenerationConfig,
+    GenerationConfigurationError,
     GenerationPlan,
     GenerationResult,
     generation_stage_config,
@@ -154,12 +155,18 @@ def run_generation_shard(
         candidates_path = output / "candidates.jsonl"
         failures_path = output / "failures.jsonl"
         manifest_path = output / "manifest.json"
-        _validate_existing_manifest(manifest_path, plan, candidates_path, failures_path)
+        existing_manifest = _validate_existing_manifest(manifest_path, plan, candidates_path, failures_path)
         _ensure_file(candidates_path)
         _ensure_file(failures_path)
 
         candidate_scan = scan_jsonl(candidates_path, recover_incomplete_tail=True)
         failure_scan = scan_jsonl(failures_path, recover_incomplete_tail=True)
+        if existing_manifest is not None:
+            _validate_manifest_confirmed_prefix(
+                existing_manifest,
+                candidates_path,
+                failures_path,
+            )
         candidates = _candidate_records(candidate_scan.records)
         failures = _failure_records(failure_scan.records)
         _validate_history(plan, candidates, failures)
@@ -175,6 +182,8 @@ def run_generation_shard(
             batch = tuple(missing[start : start + plan.generator_config.batch_size])
             try:
                 results = backend.generate(batch, plan.generator_config)
+            except GenerationConfigurationError:
+                raise
             except (KeyboardInterrupt, SystemExit):
                 raise
             except Exception as error:
@@ -332,11 +341,11 @@ def _validate_existing_manifest(
     plan: GenerationShardPlan,
     candidates_path: Path,
     failures_path: Path,
-) -> None:
+) -> dict[str, object] | None:
     if not manifest_path.exists():
         if any(path.exists() and path.stat().st_size for path in (candidates_path, failures_path)):
             raise RunMismatchError("generation manifest is missing for existing shard records")
-        return
+        return None
     try:
         manifest = json.loads(
             manifest_path.read_text(encoding="utf-8"),
@@ -356,6 +365,51 @@ def _validate_existing_manifest(
     expected = _manifest_identity(plan)
     if any(manifest.get(key) != value for key, value in expected.items()):
         raise RunMismatchError("generation manifest does not match the complete shard config")
+    return manifest
+
+
+def _validate_manifest_confirmed_prefix(
+    manifest: Mapping[str, object],
+    candidates_path: Path,
+    failures_path: Path,
+) -> None:
+    """Require each manifest-confirmed JSONL prefix to remain byte-identical."""
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise IntegrityError("manifest-confirmed prefix metadata is malformed")
+    expected_paths = {
+        "candidates.jsonl": candidates_path,
+        "failures.jsonl": failures_path,
+    }
+    by_path: dict[str, Mapping[str, object]] = {}
+    for artifact in artifacts:
+        if not isinstance(artifact, Mapping):
+            raise IntegrityError("manifest-confirmed prefix metadata is malformed")
+        relative_path = artifact.get("relative_path")
+        if relative_path not in expected_paths or relative_path in by_path:
+            raise IntegrityError("manifest-confirmed prefix metadata is malformed")
+        by_path[relative_path] = artifact
+    if set(by_path) != set(expected_paths):
+        raise IntegrityError("manifest-confirmed prefix metadata is malformed")
+
+    for relative_path, path in expected_paths.items():
+        artifact = by_path[relative_path]
+        record_count = artifact.get("record_count")
+        stored_sha256 = artifact.get("sha256")
+        if (
+            type(record_count) is not int
+            or record_count < 0
+            or not isinstance(stored_sha256, str)
+            or not _HASH.fullmatch(stored_sha256)
+        ):
+            raise IntegrityError("manifest-confirmed prefix metadata is malformed")
+        data = path.read_bytes()
+        lines = [raw + b"\n" for raw in data.split(b"\n")[:-1]]
+        if len(lines) < record_count:
+            raise IntegrityError("manifest-confirmed prefix was truncated")
+        prefix = b"".join(lines[:record_count])
+        if sha256_hex(prefix) != stored_sha256:
+            raise IntegrityError("manifest-confirmed prefix was modified")
 
 
 def _validate_history(

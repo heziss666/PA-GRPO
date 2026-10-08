@@ -3,7 +3,8 @@ from dataclasses import replace
 
 import pytest
 
-from permstudy.data_pipeline.io import IntegrityError, scan_jsonl
+from permstudy.data_pipeline.canonical import canonical_json_bytes, sha256_hex
+from permstudy.data_pipeline.io import IntegrityError, append_record, scan_jsonl
 from permstudy.data_pipeline.schema import CandidateRecord, FailureRecord, Source, Split, SplitAssignment
 
 
@@ -283,6 +284,62 @@ def test_runner_quarantines_an_incomplete_tail_before_resume(tmp_path):
     assert (output / "candidates.jsonl").read_bytes().endswith(b"\n")
 
 
+def test_resume_accepts_a_complete_record_appended_ahead_of_the_manifest(tmp_path):
+    from permstudy.data_pipeline.generation import run_generation_shard
+
+    _, shard = shard_plan(question_count=1)
+    output = tmp_path / "shard"
+    first = run_generation_shard(shard, ScriptedBackend(["success", ("failure", "timeout")]), output)
+    assert first.successful == 1
+
+    crash_ahead = CandidateRecord(
+        plan=shard.candidates[1],
+        response=f"response:{shard.candidates[1].candidate_id}",
+        finish_reason="stop",
+        generated_token_count=3,
+        model_revision=MODEL_REVISION,
+    )
+    append_record(output / "candidates.jsonl", crash_ahead.to_dict())
+
+    resumed = run_generation_shard(shard, NoCallBackend(), output)
+
+    assert resumed.successful == 2
+    assert resumed.missing == 0
+    assert resumed.historical_failures == 1
+
+
+def test_resume_rejects_truncation_of_a_manifest_confirmed_record(tmp_path):
+    from permstudy.data_pipeline.generation import run_generation_shard
+
+    _, shard = shard_plan(question_count=1)
+    output = tmp_path / "shard"
+    run_generation_shard(shard, ScriptedBackend(["success", "success"]), output)
+    candidates_path = output / "candidates.jsonl"
+    committed = candidates_path.read_bytes().splitlines(keepends=True)
+    candidates_path.write_bytes(b"".join(committed[:-1]))
+
+    with pytest.raises(IntegrityError, match="manifest-confirmed prefix"):
+        run_generation_shard(shard, NoCallBackend(), output)
+
+
+def test_resume_rejects_mutation_even_with_a_recomputed_record_hash(tmp_path):
+    from permstudy.data_pipeline.generation import run_generation_shard
+
+    _, shard = shard_plan(question_count=1)
+    output = tmp_path / "shard"
+    run_generation_shard(shard, ScriptedBackend(["success", "success"]), output)
+    candidates_path = output / "candidates.jsonl"
+    lines = candidates_path.read_bytes().splitlines(keepends=True)
+    first = json.loads(lines[0])
+    first["response"] = "mutated but internally rehashed"
+    payload = {key: value for key, value in first.items() if key != "record_hash"}
+    first["record_hash"] = sha256_hex(canonical_json_bytes(payload))
+    candidates_path.write_bytes(canonical_json_bytes(first) + b"\n" + b"".join(lines[1:]))
+
+    with pytest.raises(IntegrityError, match="manifest-confirmed prefix"):
+        run_generation_shard(shard, NoCallBackend(), output)
+
+
 def test_runner_refuses_a_malformed_committed_middle_line(tmp_path):
     from permstudy.data_pipeline.generation import run_generation_shard
 
@@ -316,6 +373,19 @@ def test_backend_oom_is_a_recoverable_failure_record(tmp_path):
     assert summary.successful == 0
     assert summary.historical_failures == 2
     assert summary.missing == 2
+
+
+def test_backend_configuration_error_propagates_without_failure_records(tmp_path):
+    from permstudy.data_pipeline.generation import GenerationConfigurationError, run_generation_shard
+
+    _, shard = shard_plan(question_count=1)
+    output = tmp_path / "shard"
+    backend = ScriptedBackend([GenerationConfigurationError("private configuration detail")])
+
+    with pytest.raises(GenerationConfigurationError, match="private configuration detail"):
+        run_generation_shard(shard, backend, output)
+
+    assert read_business_records(output / "failures.jsonl", FailureRecord) == []
 
 
 def test_runner_rejects_an_unsanitized_backend_error_before_appending_it(tmp_path):
