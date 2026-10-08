@@ -1,4 +1,5 @@
 *.sh text eol=lf
 tests_permstudy/fixtures/data_pipeline/** text eol=lf
+artifacts/gpu_smoke/task4/** text eol=lf
 artifacts/gpu_smoke/task4/preflight.txt -whitespace
 artifacts/gpu_smoke/task4/train.log -whitespace
