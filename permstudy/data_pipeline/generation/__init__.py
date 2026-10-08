@@ -14,6 +14,15 @@ from .base import (
     plan_generation,
 )
 from .fake import FakeGenerationBackend
+from .runner import (
+    GenerationShardPlan,
+    RunMismatchError,
+    ShardRunSummary,
+    build_generation_shard_plan,
+    run_generation_shard,
+    semantic_candidate_set_hash,
+    successful_candidate_keys,
+)
 from .vllm import VLLMGenerationBackend
 
 __all__ = [
@@ -27,7 +36,14 @@ __all__ = [
     "GenerationPlan",
     "GenerationRequest",
     "GenerationResult",
+    "GenerationShardPlan",
+    "RunMismatchError",
+    "ShardRunSummary",
     "VLLMGenerationBackend",
+    "build_generation_shard_plan",
     "generation_stage_config",
     "plan_generation",
+    "run_generation_shard",
+    "semantic_candidate_set_hash",
+    "successful_candidate_keys",
 ]

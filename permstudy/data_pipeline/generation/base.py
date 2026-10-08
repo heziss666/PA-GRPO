@@ -136,6 +136,8 @@ class GenerationPlan:
     config_hash: str
     candidates: tuple[CandidatePlan, ...]
     shard_ids: tuple[str, ...]
+    generator_configs: tuple[GenerationConfig, ...]
+    shard_size: int
 
 
 @dataclass(frozen=True)
@@ -232,6 +234,8 @@ def plan_generation(
         config_hash=config_hash,
         candidates=tuple(candidates),
         shard_ids=tuple(shard_ids),
+        generator_configs=configs,
+        shard_size=shard_size,
     )
 
 
