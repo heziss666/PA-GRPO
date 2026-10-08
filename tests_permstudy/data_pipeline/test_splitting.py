@@ -19,6 +19,7 @@ from permstudy.data_pipeline.schema import (
     Split,
 )
 from permstudy.data_pipeline.io import append_record, scan_jsonl, write_atomic_manifest
+from permstudy.data_pipeline.ids import run_id
 from permstudy.data_pipeline.sources import SourceSnapshot
 
 
@@ -168,12 +169,30 @@ def test_split_stage_config_role_binds_both_source_manifests():
     )
     assert config == {
         "lineage_schema": "role_tagged_upstream_v1",
-        "parameters": {"split_seed": 42},
+        "parameters": {
+            "split_algorithm": "deterministic_stratified_question_split_v1",
+            "split_schema_version": "split_manifest_v1",
+            "split_seed": 42,
+        },
         "upstream_bindings": {
             "math_questions": "1" * 64,
             "reclor_questions": "2" * 64,
         },
     }
+
+
+def test_split_run_namespace_changes_with_algorithm_version(monkeypatch):
+    module = splitting_module()
+    bindings = {"math_questions": "1" * 64, "reclor_questions": "2" * 64}
+    first = module.split_stage_config(42, bindings)
+    repeated = module.split_stage_config(42, dict(reversed(tuple(bindings.items()))))
+
+    assert run_id("split", first) == run_id("split", repeated)
+
+    monkeypatch.setattr(module, "SPLIT_ALGORITHM", "deterministic_stratified_question_split_v2")
+    changed = module.split_stage_config(42, bindings)
+
+    assert run_id("split", first) != run_id("split", changed)
 
 
 def test_bound_split_verifies_named_manifests_and_artifacts_before_building(tmp_path):

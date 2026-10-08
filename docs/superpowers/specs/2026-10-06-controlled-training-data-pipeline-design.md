@@ -210,6 +210,8 @@ split_seed = 42
 
 The split manifest uses canonical UTF-8 JSONL with sorted keys and exactly one LF after every record. The first record is `record_type="split_metadata"`; it records the schema version, `split_algorithm="deterministic_stratified_question_split_v1"`, per-source question-normalization versions, source revisions/snapshot identities, seed, selected stratification levels, and fallback reasons. Every remaining record is `record_type="split_assignment"`, contains one `SplitAssignment`, and is sorted by `original_question_id`. The SHA256 of these exact persisted bytes is the `split_manifest_hash`; later CLI persistence must call the same package renderer rather than reconstructing the payload independently.
 
+The split stage typed configuration also binds `split_seed`, `split_algorithm`, and `split_schema_version` in addition to its role-tagged source-manifest bindings. Therefore any algorithm/schema version change moves both the split run namespace (`run_id`/`config_hash`) and the persisted output lineage.
+
 Every downstream run binds all three values:
 
 ```text

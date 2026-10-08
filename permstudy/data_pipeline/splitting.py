@@ -58,7 +58,11 @@ def split_stage_config(split_seed: int, upstream_bindings: Mapping[str, str]) ->
     if type(split_seed) is not int or split_seed < 0:
         raise ValueError("split_seed must be a nonnegative integer")
     return role_bound_stage_config(
-        {"split_seed": split_seed},
+        {
+            "split_algorithm": SPLIT_ALGORITHM,
+            "split_schema_version": SPLIT_SCHEMA,
+            "split_seed": split_seed,
+        },
         upstream_bindings,
         {"math_questions", "reclor_questions"},
     )
