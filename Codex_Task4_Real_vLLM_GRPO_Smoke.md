@@ -714,3 +714,50 @@ This commit contains the execution/design plan only. Do not implement the script
 - artifact contents.
 
 After approval, execute Tasks 1–3 locally with TDD, review those scripts, then proceed to Tasks 4–6 on AutoDL.
+
+---
+
+## 8. Actual Execution Result
+
+The real GPU smoke was executed on an NVIDIA H800 PCIe GPU. The successful run was `task4_run_003_offload` and completed exactly two optimization steps with real synchronous vLLM generation, explicit identity, PA pair-baseline metrics, FSDP2/LoRA actor updates, step 1/2 checkpoints, adapter merge/normalization, and a minimal controlled evaluation.
+
+The original strict-verifier machine-readable outputs record `passed=true` and `failures=[]`. The original verifier stdout/stderr transcript and shell exit code were not retained, and the deleted full checkpoint tree was not reconstructed for a post-hoc replay.
+
+## 9. Provenance
+
+- Successful training code: `22945d2c187d2a748e94221f3e7834fcbca10d61`.
+- Later verifier runtime-marker fix: `e38d3a8`.
+- Merge to `main`: `944e196`.
+- Model: `Qwen/Qwen3-8B@b968826d9c46dd6066d109eabc6255188de91218`.
+
+The training did not run at `e38d3a8` or `944e196`. Model shard/config/tokenizer/index hashes were independently matched to the recorded official revision during evidence review.
+
+## 10. Retry History
+
+- Run 001 artifacts were not retained. It remains historical execution context only; no specific failure reason is asserted as captured evidence.
+- Run 002 has retained review-support evidence. With actor parameter/optimizer CPU offload, real vLLM started, both rollout steps completed, and step 1 checkpoint saving succeeded. Step 2 checkpoint saving failed when `/root/autodl-tmp` exhausted storage and PyTorch reported `PytorchStreamWriter failed writing file`. This was a storage/environment failure, not an algorithm-path failure.
+- Run 003 used the same effective training configuration as Run 002 and succeeded after storage-capacity remediation.
+
+## 11. Config Delta
+
+The successful effective configuration included:
+
+```text
+actor_rollout_ref.actor.fsdp_config.param_offload=true
+actor_rollout_ref.actor.fsdp_config.optimizer_offload=true
+actor_rollout_ref.rollout.gpu_memory_utilization=0.50
+```
+
+Run 002 and Run 003 differ in run identity and paths, not in effective training configuration. The Run 002 to Run 003 correction was storage remediation.
+
+## 12. Evidence Index
+
+The curated compact evidence is under `artifacts/gpu_smoke/task4/`. Its README distinguishes captured execution evidence, post-hoc review, historical context, and artifacts that were not retained. The repository checksum manifest is regenerated from the final curated directory and excludes itself.
+
+## 13. Final Review Status
+
+**Task 4 repository evidence: SEALED.**
+
+**Task 4 overall project gate: PASS.**
+
+The independent evidence review completed with no Critical, Important, or Minor findings and explicitly approved the curated artifact for commit. The PASS is bounded by the retention disclosures in `artifacts/gpu_smoke/task4/README.md`; it does not claim that deleted full-run artifacts were reconstructed or that the compact directory alone can replay the strict verifier.

@@ -1,0 +1,15 @@
+{
+  "adapter_dir": "lora_adapter",
+  "after_sha256": "db8c363a8877bf8d3c1e067c18927a9ebc97de31023d5f0c0de736eb84127734",
+  "before_sha256": "6fc35084b79b419ab874bf9585252260dfc8d1008fdbde044ae6db1b07c91af1",
+  "config_file": "adapter_config.json",
+  "corrected": true,
+  "expected_alpha": 64,
+  "expected_rank": 32,
+  "observed_alpha_after": 64,
+  "observed_alpha_before": 0,
+  "observed_rank": 32,
+  "scaling_after": 2.0,
+  "scaling_before": 0.0,
+  "schema_version": "task4_adapter_normalization_v1"
+}

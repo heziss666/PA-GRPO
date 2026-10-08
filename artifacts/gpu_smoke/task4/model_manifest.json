@@ -1,0 +1,8 @@
+{
+  "model_id": "Qwen/Qwen3-8B",
+  "model_path": "/root/autodl-tmp/models/Qwen3-8B",
+  "download_source": "ModelScope Qwen/Qwen3-8B@master",
+  "pinned_huggingface_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+  "config_sha256": "f7c4eadfbbf522470667b797a3c89be2524832d2d599797248dc304fff447c30",
+  "tokenizer_config_sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+}

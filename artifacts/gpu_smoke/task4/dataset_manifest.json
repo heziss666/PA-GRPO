@@ -1,0 +1,200 @@
+{
+  "fixture_file_sha256": "c6107fd6ddfc60b50bc9564148d051e6fd26260484cfe28902f71e7916fbbdc4",
+  "fixture_sha256": "8935b982b3782fccef2ed2f7eba0f3b84cab9e149f5f4da9e7218aa69cd31ce1",
+  "pair_count": 8,
+  "pairs": [
+    {
+      "max_prompt_tokens": 1127,
+      "original_question_id": "bd2415ecf89a44458b3ae1efbadb4dfb",
+      "pair_id": "bd2415ecf89a44458b3ae1efbadb4dfb",
+      "rows": [
+        {
+          "ground_truth": "B",
+          "permutation": 0,
+          "prompt_sha256": "6742b9bc34e9ad08f60fcb8fb6b4509b2650102dc380071e53d4c213daea82a2",
+          "prompt_tokens": 1127,
+          "row_index": 3624
+        },
+        {
+          "ground_truth": "A",
+          "permutation": 1,
+          "prompt_sha256": "bba3a10a68ffecf87b178329e82ffad7a4a7df2315b7fe2c04d9de3b37df1eb1",
+          "prompt_tokens": 1127,
+          "row_index": 3625
+        }
+      ],
+      "winner": "model_b"
+    },
+    {
+      "max_prompt_tokens": 170,
+      "original_question_id": "8c5d86247b3c4cad83660b54c7652ce7",
+      "pair_id": "8c5d86247b3c4cad83660b54c7652ce7",
+      "rows": [
+        {
+          "ground_truth": "B",
+          "permutation": 0,
+          "prompt_sha256": "819def4fba795afef6b0f1aa4fb0cb8cf44656ad50ff2c808d3115d831a9e56d",
+          "prompt_tokens": 170,
+          "row_index": 2732
+        },
+        {
+          "ground_truth": "A",
+          "permutation": 1,
+          "prompt_sha256": "f8f09d88c60c5f12fdf182b3942e2ca117792e81b9aec87b60fc5c6b0a52756c",
+          "prompt_tokens": 170,
+          "row_index": 2733
+        }
+      ],
+      "winner": "model_b"
+    },
+    {
+      "max_prompt_tokens": 777,
+      "original_question_id": "1c5d3be5017c41e393a218cb9b043b3b",
+      "pair_id": "1c5d3be5017c41e393a218cb9b043b3b",
+      "rows": [
+        {
+          "ground_truth": "A",
+          "permutation": 0,
+          "prompt_sha256": "2a977367bd922554596c9ab055724c396c6e8d9fa1b4f835c0486d0138b21f25",
+          "prompt_tokens": 777,
+          "row_index": 4932
+        },
+        {
+          "ground_truth": "B",
+          "permutation": 1,
+          "prompt_sha256": "0278012422e306e4c52c7f7893efb0a462e708d5f5088a2a463e64b292105386",
+          "prompt_tokens": 777,
+          "row_index": 4933
+        }
+      ],
+      "winner": "model_a"
+    },
+    {
+      "max_prompt_tokens": 308,
+      "original_question_id": "ae885d83d80040de8e6a52864b5a6b0c",
+      "pair_id": "ae885d83d80040de8e6a52864b5a6b0c",
+      "rows": [
+        {
+          "ground_truth": "B",
+          "permutation": 0,
+          "prompt_sha256": "147ccacc0f07cd91811b260ede608e373a5651befcc8935620a8b7dcc728f1aa",
+          "prompt_tokens": 308,
+          "row_index": 3834
+        },
+        {
+          "ground_truth": "A",
+          "permutation": 1,
+          "prompt_sha256": "604017f53adec38ec45b10cb1fa34c3d1c868d5f3bdc6293b803c334b9265fb7",
+          "prompt_tokens": 308,
+          "row_index": 3835
+        }
+      ],
+      "winner": "model_b"
+    },
+    {
+      "max_prompt_tokens": 607,
+      "original_question_id": "e67f8f4394064ed185dd1fb5c5a4c363",
+      "pair_id": "e67f8f4394064ed185dd1fb5c5a4c363",
+      "rows": [
+        {
+          "ground_truth": "B",
+          "permutation": 0,
+          "prompt_sha256": "f5749cd9d4901d9e5acc871084b98bb03df2799be7f9d38475581fd5d4463011",
+          "prompt_tokens": 607,
+          "row_index": 3676
+        },
+        {
+          "ground_truth": "A",
+          "permutation": 1,
+          "prompt_sha256": "29ffbdf05e00ca3bfc7799fe2b7863a0d0dcb448d229150ee2a58ab2ecfa2486",
+          "prompt_tokens": 607,
+          "row_index": 3677
+        }
+      ],
+      "winner": "model_b"
+    },
+    {
+      "max_prompt_tokens": 371,
+      "original_question_id": "9795d41e6ae44f01bb619fbcd0031d16",
+      "pair_id": "9795d41e6ae44f01bb619fbcd0031d16",
+      "rows": [
+        {
+          "ground_truth": "B",
+          "permutation": 0,
+          "prompt_sha256": "8fef2f135f6359ca2654e125cb6b2482b21d0caeb43679259f8bd659c63221b2",
+          "prompt_tokens": 371,
+          "row_index": 8044
+        },
+        {
+          "ground_truth": "A",
+          "permutation": 1,
+          "prompt_sha256": "bfdd39f56f2a1bd8d93db2dd100cd94e23efb62a0d6b5ed4e96053aade0bef77",
+          "prompt_tokens": 371,
+          "row_index": 8045
+        }
+      ],
+      "winner": "model_b"
+    },
+    {
+      "max_prompt_tokens": 544,
+      "original_question_id": "14728d76ca464160adb89c11dc1c11f6",
+      "pair_id": "14728d76ca464160adb89c11dc1c11f6",
+      "rows": [
+        {
+          "ground_truth": "A",
+          "permutation": 0,
+          "prompt_sha256": "3b3609e44e220e3026a0b8a425f13cbc6270255bb890eb00c590c447d1cae74b",
+          "prompt_tokens": 544,
+          "row_index": 1188
+        },
+        {
+          "ground_truth": "B",
+          "permutation": 1,
+          "prompt_sha256": "9c5984474364f3b42cbda126fa112a707b850111cade7b4a8588f4f6a09a0db3",
+          "prompt_tokens": 544,
+          "row_index": 1189
+        }
+      ],
+      "winner": "model_a"
+    },
+    {
+      "max_prompt_tokens": 418,
+      "original_question_id": "57be8cdb8f8c4dfb968fb6041a3ae0bb",
+      "pair_id": "57be8cdb8f8c4dfb968fb6041a3ae0bb",
+      "rows": [
+        {
+          "ground_truth": "A",
+          "permutation": 0,
+          "prompt_sha256": "18fb35e596d36d15da50c47f58ab48b8489f8de1a72de6b345f389ddc41c64cd",
+          "prompt_tokens": 418,
+          "row_index": 6960
+        },
+        {
+          "ground_truth": "B",
+          "permutation": 1,
+          "prompt_sha256": "bbd6ddb8e7b64fe24f10a4e31e59849c73ed946a04c2f953ad119cb0c538d55f",
+          "prompt_tokens": 418,
+          "row_index": 6961
+        }
+      ],
+      "winner": "model_a"
+    }
+  ],
+  "row_count": 16,
+  "schema_version": "task4_tiny_pairwise_smoke_v1",
+  "selection": {
+    "eligible_pairs": 6076,
+    "excluded_overlong_pairs": 0,
+    "max_prompt_length": 4096,
+    "order_rule": "alternating_extremes_v1",
+    "pair_count": 8,
+    "rule": "prompt_length_quantile_bucket_v1",
+    "seed": 42
+  },
+  "source": {
+    "path": "chatbot_arena_raw_2perm_thinking.parquet",
+    "rows": 12152,
+    "sha256": "5c6cab38ddd872bd599399478c79253c5e4ab06c34808b7edff235db76d3f132",
+    "validated_questions": 6076
+  }
+}

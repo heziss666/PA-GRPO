@@ -1,0 +1,46 @@
+{
+  "bad_pair_joins": [],
+  "blocks": [
+    {
+      "bad_pair_joins": [],
+      "base_rows": 32,
+      "duplicate_check_keys": 0,
+      "missing_check_keys": [],
+      "pair_checks": 16,
+      "placement_reordered": true,
+      "source_index_reordered": true,
+      "source_indices_usable": true,
+      "unexpected_check_keys": [],
+      "unpaired": 0
+    },
+    {
+      "bad_pair_joins": [],
+      "base_rows": 32,
+      "duplicate_check_keys": 0,
+      "missing_check_keys": [],
+      "pair_checks": 16,
+      "placement_reordered": true,
+      "source_index_reordered": true,
+      "source_indices_usable": true,
+      "unexpected_check_keys": [],
+      "unpaired": 0
+    }
+  ],
+  "canonical_placement_count": 32,
+  "duplicate_check_keys": 0,
+  "expected_blocks": 2,
+  "expected_pair_check_count_per_block": 16,
+  "pair_check_count": 32,
+  "placement_reordered": true,
+  "reorder_observed": true,
+  "reward_log_blocks": 2,
+  "source_index_reordered": true,
+  "source_indices_usable": true,
+  "unpaired_count": 0,
+  "window": {
+    "end_offset_bytes": 210738,
+    "line_count": 160,
+    "start_offset_bytes": 105664,
+    "window_bytes": 105074
+  }
+}
