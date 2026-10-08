@@ -1,0 +1,46 @@
+===== NVIDIA SMI =====
+Wed Oct  7 19:18:46 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.71.05              Driver Version: 595.71.05      CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H800 PCIe               On  |   00000000:18:00.0 Off |                  Off |
+| N/A   33C    P0             51W /  350W |       0MiB /  81559MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+===== PYTHON =====
+Python 3.12.15
+
+===== CORE IMPORTS =====
+INFO 10-07 19:18:51 [__init__.py:239] Automatically detected platform cuda.
+torch      = 2.6.0+cu124
+torch CUDA = 12.4
+CUDA avail = True
+GPU        = NVIDIA H800 PCIe
+VRAM GiB   = 79.1806640625
+ray        = 2.49.0
+vllm       = 0.8.5
+flash_attn = 2.6.3
+verl       = /root/autodl-tmp/workspace/PA-GRPO/verl/__init__.py
+
+===== GIT =====
+22945d2c187d2a748e94221f3e7834fcbca10d61
+
+===== DISK =====
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/md0        100G   40G   61G  40% /root/autodl-tmp
+
+===== PIP CHECK =====
+No broken requirements found.
