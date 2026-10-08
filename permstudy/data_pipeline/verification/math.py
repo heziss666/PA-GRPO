@@ -3,6 +3,7 @@
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version as distribution_version
+import json
 import math
 import multiprocessing
 from multiprocessing.connection import Connection
@@ -21,6 +22,7 @@ from ..schema import (
 MATH_VERIFY_VERSION = "0.9.0"
 MATH_PARSER_VERSION = "math_boxed_final_v1"
 MATH_VERIFIER_NAME = "math-verify"
+MATH_CANONICAL_REPRESENTATION_VERSION = "sympy_srepr_v1"
 
 _BOX_MARKER = r"\boxed{"
 _EXTRACTION_STATUSES = frozenset({"parsed", "invalid", "ambiguous"})
@@ -32,7 +34,7 @@ _CANDIDATE_RESULT = "CANDIDATE_RESULT"
 _CANDIDATE_ERROR = "CANDIDATE_ERROR"
 
 GoldParserHook = Callable[[str, object], object]
-CandidateVerifierHook = Callable[[object, str, object], bool | None]
+CandidateVerifierHook = Callable[[object, str, object], tuple[bool | None, str | None]]
 
 
 class DependencyContractError(RuntimeError):
@@ -108,7 +110,7 @@ def verify_math_question(
     gold_hook = gold_parser_hook or _math_verify_gold_parser
     candidate_hook = candidate_verifier_hook or _math_verify_candidate_verifier
     context = multiprocessing.get_context("spawn")
-    worker, gold_error = _start_worker(
+    worker, gold_error, canonical_gold = _start_worker(
         context,
         gold_box.boxed_text,
         gold_hook,
@@ -124,7 +126,7 @@ def verify_math_question(
         original_question_id=question.original_question_id,
         source=Source.MATH,
         gold_parse_status="ok",
-        canonical_gold=gold_box.boxed_text,
+        canonical_gold=canonical_gold,
         error_type=None,
     )
     question_record.validate()
@@ -152,7 +154,7 @@ def verify_math_question(
                 continue
 
             if worker is None:
-                worker, restart_error = _start_worker(
+                worker, restart_error, restarted_canonical_gold = _start_worker(
                     context,
                     gold_box.boxed_text,
                     gold_hook,
@@ -161,20 +163,13 @@ def verify_math_question(
                     gold_timeout_seconds,
                 )
                 if worker is None:
-                    verified.append(
-                        _verification_record(
-                            candidate,
-                            verification_run_id,
-                            candidate_timeout_seconds,
-                            VerificationStatus.ERROR,
-                            "error",
-                            extracted.boxed_text,
-                            restart_error,
-                        )
-                    )
-                    continue
+                    return _gold_error(question, verification_run_id, restart_error), []
+                if restarted_canonical_gold != canonical_gold:
+                    _shutdown_worker(worker)
+                    worker = None
+                    return _gold_error(question, verification_run_id, "gold_parse_failure"), []
 
-            outcome, error_type = _verify_in_worker(
+            outcome, error_type, canonical_prediction = _verify_in_worker(
                 worker,
                 extracted.boxed_text,
                 candidate_timeout_seconds,
@@ -189,7 +184,7 @@ def verify_math_question(
                         candidate_timeout_seconds,
                         VerificationStatus.ERROR,
                         "error",
-                        extracted.boxed_text,
+                        None,
                         "timeout",
                     )
                 )
@@ -201,7 +196,7 @@ def verify_math_question(
                         candidate_timeout_seconds,
                         VerificationStatus.ERROR,
                         "error",
-                        extracted.boxed_text,
+                        None,
                         error_type,
                     )
                 )
@@ -213,7 +208,7 @@ def verify_math_question(
                         candidate_timeout_seconds,
                         VerificationStatus.AMBIGUOUS,
                         "ambiguous",
-                        extracted.boxed_text,
+                        canonical_prediction,
                         "math_parse_failure",
                     )
                 )
@@ -226,7 +221,7 @@ def verify_math_question(
                         candidate_timeout_seconds,
                         status,
                         "parsed",
-                        extracted.boxed_text,
+                        canonical_prediction,
                         None,
                     )
                 )
@@ -346,7 +341,11 @@ def _math_verify_gold_parser(boxed_text: str, _state: object) -> object:
     return parsed[0]
 
 
-def _math_verify_candidate_verifier(gold: object, boxed_text: str, _state: object) -> bool | None:
+def _math_verify_candidate_verifier(
+    gold: object,
+    boxed_text: str,
+    _state: object,
+) -> tuple[bool | None, str | None]:
     from math_verify import parse, verify
 
     parsed = parse(
@@ -357,7 +356,8 @@ def _math_verify_candidate_verifier(gold: object, boxed_text: str, _state: objec
         raise_on_error=True,
     )
     if len(parsed) != 1:
-        return None
+        return None, None
+    canonical_prediction = _canonical_math_value(parsed[0])
     equivalent = verify(
         gold,
         parsed[0],
@@ -367,7 +367,19 @@ def _math_verify_candidate_verifier(gold: object, boxed_text: str, _state: objec
     )
     if type(equivalent) is not bool:
         raise TypeError("math-verify returned a non-boolean equivalence result")
-    return equivalent
+    return equivalent, canonical_prediction
+
+
+def _canonical_math_value(value: object) -> str:
+    """Encode one parsed value as a deterministic private string, never an object."""
+    from sympy import Basic, MatrixBase, srepr
+
+    if isinstance(value, (Basic, MatrixBase)):
+        return f"{MATH_CANONICAL_REPRESENTATION_VERSION}:{srepr(value)}"
+    if isinstance(value, str):
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return f"string_json_v1:{encoded}"
+    raise TypeError("math parser returned an unsupported canonical value")
 
 
 def _worker_main(
@@ -382,6 +394,7 @@ def _worker_main(
             gold = gold_parser_hook(boxed_gold, worker_state)
             if gold is None:
                 raise _MathParseFailure("gold parser returned no expression")
+            canonical_gold = _canonical_math_value(gold)
         except BaseException as error:
             sanitized = sanitize_exception(error)
             error_type = (
@@ -391,7 +404,7 @@ def _worker_main(
             )
             connection.send((_GOLD_ERROR, error_type))
             return
-        connection.send((_GOLD_READY,))
+        connection.send((_GOLD_READY, canonical_gold))
         while True:
             message = connection.recv()
             if message == (_STOP,):
@@ -399,11 +412,21 @@ def _worker_main(
             if not isinstance(message, tuple) or len(message) != 2 or message[0] != _VERIFY:
                 return
             try:
-                equivalent = candidate_verifier_hook(gold, message[1], worker_state)
+                equivalent, canonical_prediction = candidate_verifier_hook(gold, message[1], worker_state)
                 if equivalent is None:
-                    connection.send((_CANDIDATE_RESULT, "ambiguous"))
+                    if canonical_prediction is not None:
+                        raise TypeError("ambiguous candidate must not carry a canonical prediction")
+                    connection.send((_CANDIDATE_RESULT, "ambiguous", None))
                 elif type(equivalent) is bool:
-                    connection.send((_CANDIDATE_RESULT, "correct" if equivalent else "incorrect"))
+                    if not isinstance(canonical_prediction, str) or not canonical_prediction:
+                        raise TypeError("verified candidate must carry a canonical prediction")
+                    connection.send(
+                        (
+                            _CANDIDATE_RESULT,
+                            "correct" if equivalent else "incorrect",
+                            canonical_prediction,
+                        )
+                    )
                 else:
                     raise TypeError("candidate verifier hook returned an unsupported result")
             except BaseException as error:
@@ -421,7 +444,7 @@ def _start_worker(
     candidate_verifier_hook: CandidateVerifierHook,
     worker_state: object,
     timeout_seconds: float,
-) -> tuple[_WorkerHandle | None, str | None]:
+) -> tuple[_WorkerHandle | None, str | None, str | None]:
     parent, child = context.Pipe(duplex=True)
     process = context.Process(
         target=_worker_main,
@@ -437,14 +460,20 @@ def _start_worker(
     worker = _WorkerHandle(process, parent)
     if not parent.poll(timeout_seconds):
         _terminate_worker(worker)
-        return None, "timeout"
+        return None, "timeout", None
     try:
         message = parent.recv()
     except (EOFError, OSError):
         _terminate_worker(worker)
-        return None, "unexpected_error"
-    if message == (_GOLD_READY,):
-        return worker, None
+        return None, "unexpected_error", None
+    if (
+        isinstance(message, tuple)
+        and len(message) == 2
+        and message[0] == _GOLD_READY
+        and isinstance(message[1], str)
+        and message[1]
+    ):
+        return worker, None, message[1]
     if (
         isinstance(message, tuple)
         and len(message) == 2
@@ -452,41 +481,42 @@ def _start_worker(
         and isinstance(message[1], str)
     ):
         _shutdown_worker(worker)
-        return None, message[1]
+        return None, message[1], None
     _terminate_worker(worker)
-    return None, "unexpected_error"
+    return None, "unexpected_error", None
 
 
 def _verify_in_worker(
     worker: _WorkerHandle,
     boxed_text: str,
     timeout_seconds: float,
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, str | None]:
     try:
         worker.connection.send((_VERIFY, boxed_text))
     except (BrokenPipeError, EOFError, OSError):
-        return "error", "unexpected_error"
+        return "error", "unexpected_error", None
     if not worker.connection.poll(timeout_seconds):
-        return "timeout", "timeout"
+        return "timeout", "timeout", None
     try:
         message = worker.connection.recv()
     except (EOFError, OSError):
-        return "error", "unexpected_error"
+        return "error", "unexpected_error", None
     if (
         isinstance(message, tuple)
-        and len(message) == 2
+        and len(message) == 3
         and message[0] == _CANDIDATE_RESULT
         and message[1] in {"correct", "incorrect", "ambiguous"}
+        and (message[2] is None or isinstance(message[2], str))
     ):
-        return message[1], None
+        return message[1], None, message[2]
     if (
         isinstance(message, tuple)
         and len(message) == 2
         and message[0] == _CANDIDATE_ERROR
         and isinstance(message[1], str)
     ):
-        return "error", message[1]
-    return "error", "unexpected_error"
+        return "error", message[1], None
+    return "error", "unexpected_error", None
 
 
 def _verification_record(

@@ -73,7 +73,7 @@ def counting_gold_parser(boxed_text, counter):
 
 
 def exact_text_verifier(gold, boxed_text, _state):
-    return gold == boxed_text
+    return gold == boxed_text, f"test_value_v1:{boxed_text}"
 
 
 def blocking_gold_parser(boxed_text, state):
@@ -98,7 +98,26 @@ def block_one_candidate_then_compare(gold, boxed_text, state):
     _counter, release = state
     if boxed_text == r"\boxed{999}":
         release.wait(30)
-    return gold == boxed_text
+    return gold == boxed_text, f"test_value_v1:{boxed_text}"
+
+
+def first_gold_then_fail(boxed_text, state):
+    gold_parse_count, _candidate_count, _release = state
+    with gold_parse_count.get_lock():
+        gold_parse_count.value += 1
+        attempt = gold_parse_count.value
+    if attempt > 1:
+        raise RuntimeError("private replacement gold payload")
+    return boxed_text
+
+
+def block_first_candidate_and_count(gold, boxed_text, state):
+    _gold_parse_count, candidate_count, release = state
+    with candidate_count.get_lock():
+        candidate_count.value += 1
+    if boxed_text == r"\boxed{999}":
+        release.wait(30)
+    return gold == boxed_text, f"test_value_v1:{boxed_text}"
 
 
 def raising_gold_parser(_boxed_text, _state):
@@ -153,7 +172,7 @@ def test_math_verify_explicitly_establishes_equivalent_and_non_equivalent_candid
     )
 
     assert gold.gold_parse_status == "ok"
-    assert gold.canonical_gold == r"\boxed{\frac{1}{2}}"
+    assert gold.canonical_gold == "sympy_srepr_v1:Rational(1, 2)"
     assert [record.verification_status for record in verified] == [
         VerificationStatus.CORRECT,
         VerificationStatus.INCORRECT,
@@ -167,10 +186,10 @@ def test_math_verify_explicitly_establishes_equivalent_and_non_equivalent_candid
         "ambiguous",
     ]
     assert [record.canonical_prediction for record in verified] == [
-        r"\boxed{0.5}",
-        r"\boxed{2}",
+        "sympy_srepr_v1:Rational(1, 2)",
+        "sympy_srepr_v1:Integer(2)",
         None,
-        r"\boxed{???}",
+        None,
     ]
     assert [record.error_type for record in verified] == [
         None,
@@ -313,6 +332,39 @@ def test_candidate_timeout_restarts_worker_and_repeats_gold_handshake():
     ]
     assert [record.error_type for record in verified] == ["timeout", None]
     assert gold_parse_count.value == 2
+    assert multiprocessing.active_children() == []
+
+
+def test_replacement_gold_handshake_failure_invalidates_entire_question():
+    from permstudy.data_pipeline.verification import verify_math_question
+
+    context = multiprocessing.get_context("spawn")
+    gold_parse_count = context.Value("i", 0)
+    candidate_count = context.Value("i", 0)
+    release = context.Event()
+    state = (gold_parse_count, candidate_count, release)
+    records = [
+        candidate("timed_out", r"\boxed{999}"),
+        candidate("triggers_restart", r"\boxed{1}", sampling_index=1),
+        candidate("must_not_run", r"\boxed{2}", sampling_index=2),
+    ]
+
+    gold, verified = verify_math_question(
+        math_question(),
+        records,
+        gold_timeout_seconds=3.0,
+        candidate_timeout_seconds=0.1,
+        verification_run_id=VERIFICATION_RUN_ID,
+        gold_parser_hook=first_gold_then_fail,
+        candidate_verifier_hook=block_first_candidate_and_count,
+        worker_state=state,
+    )
+
+    assert gold.gold_parse_status == "gold_verification_error"
+    assert gold.error_type == "gold_parse_failure"
+    assert verified == []
+    assert gold_parse_count.value == 2
+    assert candidate_count.value == 1
     assert multiprocessing.active_children() == []
 
 
