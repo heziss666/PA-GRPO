@@ -1,6 +1,6 @@
 # Controlled Training Data Pipeline Design
 
-**Status:** `DESIGN_SPEC_APPROVED`; `IMPLEMENTATION_IN_PROGRESS`; Tasks 1-6 complete; Task 7 next
+**Status:** `DESIGN_SPEC_APPROVED`; `IMPLEMENTATION_IN_PROGRESS`; Tasks 1-16 and Task 13A independently approved; Task 16B scope revision active
 
 **Branch:** `codex/data-pipeline-plan`
 
@@ -27,6 +27,8 @@ Phase 1 dependencies live in a dedicated exact-pin `requirements-data-pipeline-p
 
 The approved detailed plan is maintained at `docs/superpowers/plans/2026-10-06-controlled-training-data-pipeline-phase1.md`. Implementation proceeds task-by-task against that plan and its reviewed amendments.
 
+Task 16B narrows only the remaining Task 17/18 evidence burden. It preserves every approved Task 1-16 schema, algorithm, identity, verifier, pair/permutation, audit/gate, export, and isolation contract. The research objective is a trustworthy data-preparation system for PA-GRPO experiments, not a generalized production data platform. New work after Task 16 must directly establish either end-to-end data usability or real-source credibility.
+
 ## 2. Stage boundary
 
 ### 2.1 Phase 1: system readiness
@@ -46,7 +48,7 @@ Phase 1 covers:
 - verifier audit protocol;
 - Functional and Statistical Gate logic;
 - runtime data-isolation checks;
-- Windows/WSL unit tests and fake end-to-end tests;
+- one complete synthetic fake end-to-end path plus cross-platform core-semantic hash checks;
 - private question and split manifests stored outside Git.
 
 The only successful Phase 1 status is:
@@ -645,12 +647,14 @@ Phase 1 tests must cover:
 - trainer-ready Parquet export, artifact/manifest hashes, and a real `RLHFDataset` -> explicit identity -> rollout repeat -> reward-extra-info round trip;
 - deterministic audit sampling, verdicts, and reason codes;
 - all Gate thresholds and status transitions;
-- equivalent semantic candidate-set and downstream canonical hashes on Windows and Linux/WSL; physical execution-history manifests may differ after interruption.
+- equivalent split, candidate-set, pair, permutation, and canonical trainer-row semantic hashes on Windows and Linux/WSL; raw Parquet bytes, physical execution-history manifests, dependency metadata, timings, and duplicate full-suite logs are diagnostic-only.
 
-Two end-to-end paths are required:
+Two complementary acceptance paths are required:
 
-1. a committed, explicitly marked 80-question synthetic source fixture (40 MATH and 40 ReClor, with ten ReClor labels per option) that runs 90/10 split, deterministic 20+20 train smoke selection, fake generation, verification, audit, pairing, permutation, gates, and trainer-export round trip on Windows/WSL;
-2. a private real-source acquisition and split followed by the fake full pipeline and trainer-export round trip, with all full-text artifacts outside Git.
+1. one committed, explicitly marked 80-question synthetic source fixture (40 MATH and 40 ReClor, with ten ReClor labels per option) that runs 90/10 split, deterministic 20+20 train smoke selection, 240-candidate fake generation, verification, audit, pairing, and permutation, then evaluates gates from canonical records while independently completing the trainer-export round trip, including one representative interruption/resume comparison;
+2. one private real-source readiness path that acquires immutable MATH/ReClor snapshots, verifies source-local deduplication and the deterministic split, performs a deterministic human source/gold/format audit, checks isolation, and proves the real 20+20 smoke manifest plans exactly 240 candidates. It stops before candidate generation because real inference belongs to Phase 2 and Task 17 already proves pipeline execution.
+
+The Task 17 E2E is the only full pipeline integration test required. Existing focused tests remain authoritative for individual contracts; Task 17/18 must not add duplicate E2E variants, new protocol layers, or a new evidence framework.
 
 ## 15. Phase 1 acceptance criteria
 
@@ -666,14 +670,15 @@ Phase 1 may report `DATA_PIPELINE_SYSTEM_READY` only when all of the following a
 - MATH verification pins `math-verify==0.9.0`;
 - pair and permutation outputs are deterministic and hash-stable;
 - the trainer Parquet export is bound to split/generation/pair/permutation manifests and passes the current verl explicit-identity round trip without a legacy index fallback;
-- sanitized public artifacts pass the field allowlist;
+- one allowlisted sanitized Phase 1 summary records real-source revisions/hashes, counts, split/fallback, human-audit totals, isolation result, planning count, and Task 17 semantic hashes;
 - Git scanning finds no real source questions, real responses, real source gold, tokens/secrets, private manifests, or user-specific absolute paths;
 - explicitly marked synthetic fixture questions, responses, and gold are the only full-text fixture exception;
-- Windows/WSL unit and fake end-to-end tests pass;
+- the Task 17 core semantic hashes match across configured Windows/WSL runs; raw Parquet bytes and physical execution histories are non-blocking diagnostics;
+- the private real-source audit finds no confirmed wrong gold, corrupted fields, cross-split identity, or systematic acquisition/parser issue, and the real smoke manifest produces exactly 240 planned candidate identities without running generation;
 - an independent Phase 1 code review passes.
 
 Passing these criteria proves that the data-production system is ready for real smoke execution. It does not prove real generator quality or authorize the 200-pair pilot.
 
 ## 16. Review checkpoint
 
-The design and detailed implementation plan are approved. Tasks 1-6 are implemented and reviewed; Task 7 is next. The Task 4 real trainer/vLLM smoke path from `main` is merged into the implementation branch as the trainer-export compatibility target. No Phase 1 completion claim is permitted until Tasks 7-18 plus Task 13A pass their documented reviews, and no real generation begins before a separate Phase 2 plan is approved.
+The design and detailed implementation plan are approved. Tasks 1-16 plus Task 13A are implemented and independently reviewed. Task 16B supersedes only the former Task 17/18 acceptance breadth: one complete synthetic E2E and one private real-source readiness check now close Phase 1. No Phase 1 completion claim is permitted until the revised Tasks 17 and 18 pass their documented reviews, and no real generation begins before a separate Phase 2 plan is approved.

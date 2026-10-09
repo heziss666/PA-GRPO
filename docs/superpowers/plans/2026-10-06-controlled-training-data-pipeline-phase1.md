@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-06-controlled-training-data-pipeline-design.md`
 
-**Implementation status:** `IMPLEMENTATION_IN_PROGRESS`; Tasks 1-6 complete and reviewed; `fork/main@944e196` merged; Task 7 next. Do not claim `DATA_PIPELINE_SYSTEM_READY` yet.
+**Implementation status:** `IMPLEMENTATION_IN_PROGRESS`; Tasks 1-16 and Task 13A are complete and independently reviewed. Task 16B narrows only the remaining Task 17/18 acceptance scope; it does not reopen approved contracts. Do not claim `DATA_PIPELINE_SYSTEM_READY` yet.
 
 ## Global Constraints
 
@@ -31,6 +31,7 @@
 - Production data/cache roots are rejected if either resolved root contains the other or any effective Hugging Face cache is inside the repository.
 - Explicitly synthetic fixtures are the only committed full-text question/response/gold exception.
 - Every task follows red-green-refactor: add a focused failing test, observe the intended failure, write the smallest implementation, run focused tests, run the Phase 1 suite, then commit.
+- Task 16B is documentation-only: review its diff for consistency, but do not run implementation tests or include Task 17 code in the same commit.
 - Activate the repository's Python 3.12 Phase 1 environment before running Python module commands; never commit the environment's machine-specific absolute path.
 
 ## Approved External Data Layout
@@ -1392,7 +1393,9 @@ git commit -m "feat(data): add controlled pipeline command line interfaces"
 
 ---
 
-### Task 17: Committed Synthetic Fake End-to-End
+### Task 17: One Committed Synthetic Fake End-to-End
+
+**Task 16B scope ruling:** Task 17 proves one complete research pipeline path. It must reuse the approved Task 1-16 modules and must not add a new manifest layer, audit protocol, gate metric, or generalized data-platform abstraction. Existing focused tests remain the proof for individual contracts; this task does not duplicate them at end-to-end level.
 
 **Files:**
 - Create: `tests_permstudy/fixtures/data_pipeline/synthetic_questions.jsonl`
@@ -1407,9 +1410,9 @@ git commit -m "feat(data): add controlled pipeline command line interfaces"
 
 Provide 40 synthetic MATH and 40 synthetic ReClor source questions, each marked `synthetic=true`. ReClor has exactly ten A, ten B, ten C, and ten D official labels so the 90/10 label-stratified split is exercised. The deterministic split leaves 36 train questions per source; smoke selection then takes exactly 20 MATH and 20 ReClor train questions. Provide fake response templates for the selected questions so `40 smoke questions × 3 generators × 2 samples = 240 candidates`, covering correct/incorrect, duplicate, invalid, ambiguous, error, and historical-failure-then-success behavior while guaranteeing at least one selected pair per source.
 
-- [ ] **Step 2: Write a failing full-flow test**
+- [ ] **Step 2: Write one failing full-flow test**
 
-The test runs 80-row source loading -> 90/10 split -> deterministic 20+20 train smoke selection -> 240 candidate planning -> interrupted fake generation -> resume -> verification -> audit selection with synthetic AGREE decisions -> pairs -> permutations -> gates, while the independent consumer branch exports trainer Parquet from the same pair/permutation records. Assert 72 train and 8 held-out source questions overall, 40 selected smoke questions, 240 final successful composite keys, one pair maximum per question, two permutations per pair, equal semantic candidate-set hashes across interrupted and clean runs, stable downstream canonical pair/permutation/export hashes, and no production-only phase status. Read the exported Parquet with `RLHFDataset` and pass one complete pair through the explicit identity/repeat/reward-extra flow. Physical generation-history manifest hashes may differ when retry history differs.
+The single test runs 80-row source loading -> 90/10 split -> deterministic 20+20 train smoke selection -> 240 candidate planning -> fake generation -> verification -> audit selection with synthetic AGREE decisions -> pairs -> permutations, then evaluates gates from the canonical records while the independent consumer branch exports trainer Parquet. It also performs one representative interruption/resume comparison against an uninterrupted route. Assert 72 train and 8 held-out questions, 40 smoke questions, 240 final successful composite keys, at most one pair per question, two permutations per pair, equal successful keys and semantic candidate-set hashes after resume, stable canonical pair/permutation/trainer-row payload hashes, and no production-only phase status. Read the Parquet with `RLHFDataset` and pass one complete pair through explicit identity -> rollout repeat -> reward-extra-info. Physical generation-history manifests may differ.
 
 - [ ] **Step 3: Run the test and observe missing orchestration behavior**
 
@@ -1419,9 +1422,11 @@ Run: `python -m pytest tests_permstudy/data_pipeline/test_fake_e2e.py -v`
 
 `run_fake_e2e.py` must not duplicate stage logic. It creates an external temporary root when `--data-root` is supplied by tests, writes private artifacts there, exports trainer Parquet through the Task 13A package API, and prints only the sanitized summary. Audit/gates use canonical records, not the Parquet output.
 
-- [ ] **Step 5: Verify Windows and WSL semantic hashes**
+- [ ] **Step 5: Verify only the cross-platform semantic contract**
 
-Run the E2E in both environments and compare successful composite candidate keys, semantic candidate-set hashes, split hashes, canonical pair/permutation hashes, and the canonical trainer-row payload hash byte-for-byte. The Parquet artifact hash is also expected to match under the exact pinned dependency set; if platform metadata differs, fail and diagnose rather than weakening the manifest contract. Do not require equality of physical execution-history manifests that contain different append/failure histories.
+Run the same Task 17 E2E in the configured Windows and WSL Phase 1 environments and compare only research-semantic outputs: split assignments/hash, successful composite candidate keys, semantic candidate-set hash, canonical pair/permutation hashes, and canonical trainer-row payload hash. These remain blocking because a mismatch changes the data consumed by training.
+
+Raw Parquet bytes/hash, physical execution-history manifests, timestamps, dependency-generated metadata, timings, and repeated full-suite output are diagnostic-only. Record a concise reason if they differ, but do not fail Phase 1 when the required semantic values match. Do not create additional E2E variants merely to repeat already approved unit contracts.
 
 - [ ] **Step 6: Run full suite and commit**
 
@@ -1434,23 +1439,17 @@ git commit -m "test(data): add synthetic fake pipeline end to end"
 
 ---
 
-### Task 18: Private Real-Source Phase 1 Run and Sanitized Acceptance Evidence
+### Task 18: Private Real-Source Readiness Check and One Sanitized Summary
+
+**Task 16B scope ruling:** Task 18 answers whether the actual MATH/ReClor snapshot is versioned, structurally credible, isolated, deterministically split, and ready for Phase 2 generation. It does not repeat the complete Task 17 fake pipeline, treat fake responses as evidence about real-model quality, or create a production-platform evidence bundle.
 
 **Files:**
-- Create: `artifacts/data_pipeline/phase1/README.md`
-- Create: `artifacts/data_pipeline/phase1/environment.txt`
-- Create: `artifacts/data_pipeline/phase1/pytest_output.txt`
-- Create: `artifacts/data_pipeline/phase1/fake_e2e_summary.json`
-- Create: `artifacts/data_pipeline/phase1/trainer_export_summary.json`
-- Create: `artifacts/data_pipeline/phase1/private_source_summary.json`
-- Create: `artifacts/data_pipeline/phase1/git_data_scan.txt`
-- Modify: `scripts_permstudy/data/validate_dataset.py`
-- Modify: `tests_permstudy/data_pipeline/test_cli.py`
-- Modify: `docs/superpowers/specs/2026-10-06-controlled-training-data-pipeline-design.md`
+- Create: `artifacts/data_pipeline/phase1/summary.json`
 
 **Interfaces:**
-- Consumes all Phase 1 CLIs and approved local environment variables.
-- Produces only sanitized evidence and the terminal status `DATA_PIPELINE_SYSTEM_READY` after independent code review; before review the report status is `AWAITING_PHASE1_CODE_REVIEW`.
+- Consumes approved source/split/planning CLIs and runtime-only environment variables.
+- Produces one allowlisted sanitized summary. Full-text source samples, audit notes, manifests, and runtime logs remain private below `PAGRPO_DATA_ROOT`.
+- Uses `AWAITING_PHASE1_CODE_REVIEW` before the final review and `DATA_PIPELINE_SYSTEM_READY` only after that review passes.
 
 - [ ] **Step 1: Configure external roots without committing values**
 
@@ -1472,69 +1471,49 @@ Run `prepare_questions.py acquire-reclor` against the extracted official directo
 
 For MATH, first resolve the requested ref once to an immutable 40-hex SHA without writing an acquisition artifact. Against that exact SHA and external cache, execute `datasets.get_dataset_config_names(repo_id, revision=sha)` and load one train row from one returned config with `datasets.load_dataset(repo_id, config, split="train", revision=sha, cache_dir=...)`. If either operation reports that the pinned revision is script-only/unsupported, stop Task 18 and propose an explicit source/dependency protocol revision. Do not switch to another commit, `refs/convert/parquet`, `data_files=`, or another `datasets` version within the same run.
 
-Only after the exact-SHA preflight passes, run `prepare_questions.py acquire-math` with the same SHA. Then run `prepare_questions.py build-split` with both immutable source manifests and `split_seed=42`. Confirm private manifests contain file/revision hashes, source counts, dedup counts, fallback level, and split hash; confirm public output contains counts/hashes only.
+Only after the exact-SHA preflight passes, run `prepare_questions.py acquire-math` with the same SHA. Then run `prepare_questions.py build-split` with both immutable source manifests and `split_seed=42`. Confirm private manifests contain file/revision hashes, source counts, dedup counts, fallback level, split counts, smoke counts, and split hash; confirm public output contains counts/hashes only.
 
-- [ ] **Step 3: Run the private 40-question fake pipeline**
+- [ ] **Step 3: Perform a private, deterministic real-source audit**
 
-Use the real private smoke question manifest with the fake backend; do not run vLLM. Complete an interrupted/resumed route and a clean route, requiring equal final successful composite keys and semantic candidate-set hashes but not equal physical failure-history manifests. Complete verification, synthetic audit decisions clearly labeled as Phase 1 plumbing-only, pair/permutation build, gate calculation, and trainer Parquet export. Load the export through `RLHFDataset` and the explicit identity/repeat/reward-extra path. Do not interpret fake-response Statistical Gate results as a real smoke result, and do not make audit/gate status depend on export success.
+Using `audit_seed=42`, inspect exactly ten retained questions from each source in the private data root. Rank questions by the lexicographic tuple `(SHA256(canonical JSON of {schema="real_source_manual_audit_v1", audit_seed, source, original_question_id}), original_question_id)`. For ReClor, first select the top-ranked item for each official label A/B/C/D, then fill from the remaining global rank. For MATH, scan the rank once to take items that add a new category, scan the remainder to add new `(category, level)` strata, then fill from the remaining global rank. Skip already selected identities at every pass; if a source contains fewer than ten retained questions, audit all and fail the expected-source-count check. Retain the selected identities only in the private audit manifest.
 
-- [ ] **Step 4: Run the complete Windows and WSL test matrix**
+Compare source text structure, ordered answers/official label, MATH problem/solution availability, normalized identity, provenance, dedup disposition, and split assignment. Record private `AGREE / DISAGREE / UNSURE` notes and reason codes. Any confirmed wrong gold, field corruption, cross-split identity, or systematic acquisition/parser problem blocks readiness and must be fixed before continuing. Git records only counts and verdict totals, never selected identities, sampled text, or answers.
 
-Capture actual output, not predicted counts:
+- [ ] **Step 4: Prove the real split can enter generation planning**
 
-```powershell
-python -m pytest tests_permstudy -q | Tee-Object artifacts/data_pipeline/phase1/pytest_output.txt
-```
+Run `plan_generation.py` on the real private 20+20 smoke manifest with the three approved immutable generator configs and two samples per question. Require exactly 240 planned composite candidate keys with the real split lineage. Stop before `generate_candidates.py`: Task 17 already proves the complete fake execution path, while real inference remains Phase 2.
 
-Run the same suite in WSL Python 3.12 and append the labeled output. Record platform, Python, package versions, Git SHA, and math-verify version without user paths.
+- [ ] **Step 5: Check isolation and write one sanitized summary**
 
-- [ ] **Step 5: Scan every Git-tracked file for prohibited data**
+Run the existing resolved-root/cache isolation checks and scan tracked files using the already approved data-isolation contract. Do not add a new scanner framework unless a real violation exposes a missing check.
 
-Build a path/schema-aware scanner over `git ls-files -z`; do not search for generic words such as `gold`, `response`, or `private-manifest`. It applies these deterministic rules:
+Write only `artifacts/data_pipeline/phase1/summary.json`, using a fixed allowlist containing:
 
-1. reject tracked paths below `data_permstudy/`, `private_data/`, or `private_logs/`, and reject files ending `.private-manifest.json`;
-2. scan all tracked text for the exact resolved private-root bytes and HF/secret token patterns; apply generic Windows/POSIX user-home absolute-path detection only to the new `permstudy/data_pipeline/`, `scripts_permstudy/data/`, `tests_permstudy/fixtures/data_pipeline/`, and `artifacts/data_pipeline/phase1/` surfaces so pre-existing upstream examples/evidence are not reclassified by this feature;
-3. allow full-text question/response/gold fields only below `tests_permstudy/fixtures/data_pipeline/`, and parse every JSON/JSONL record there to require `synthetic=true`;
-4. parse JSON/JSONL below `artifacts/data_pipeline/phase1/` and require keys to be within the public manifest/evidence allowlists, rejecting payload-text fields and absolute paths;
-5. inspect newly added pipeline artifacts by schema rather than flagging terminology in design docs, source code, or schemas.
+- Git SHA and Phase 1 schema/status;
+- MATH immutable revision and ReClor tree-manifest hash;
+- source, dedup, split, held-out, and smoke counts;
+- selected MATH fallback/stratification level and split hash;
+- planned generation count and generator revision hashes;
+- private human-audit sample counts and `AGREE / DISAGREE / UNSURE` totals by source;
+- isolation/tracked-data-scan result and the Task 17 semantic E2E summary hashes;
+- `real_generation_performed=false` and one scalar `phase_status` equal to `AWAITING_PHASE1_CODE_REVIEW` or `DATA_PIPELINE_SYSTEM_READY`.
 
-Tests seed one violation for each rule plus design/schema files containing the words `gold` and `response`, proving violations fail and documentation does not self-trigger. Save only rule names, scanned file count, match count, and PASS/FAIL to `git_data_scan.txt`; never save private snippets or paths.
+The summary uses only the unchanged `PUBLIC_EVIDENCE_KEYS`; it does not add `real_smoke_gates_evaluated` or `pilot_authorized` keys. Under this Phase 1 schema, both allowed `phase_status` values normatively mean real smoke gates were not evaluated and the pilot is not authorized. The summary contains no environment dump, raw pytest log, private path, prompt, question, response, gold, human note, selected audit identity, or third-party exception payload. Diagnostic cross-platform differences are represented only through existing allowlisted scalar/list/count/hash fields.
 
-- [ ] **Step 6: Write sanitized evidence**
+- [ ] **Step 6: Run focused acceptance checks and request final review**
 
-`private_source_summary.json` includes source revisions/file hashes, the ReClor tree-manifest hash, question counts, duplicate counts, selected stratification level, split hash, and fake-run counts. `fake_e2e_summary.json` includes run IDs, semantic candidate-set hash, sanitized artifact hashes, completion counts, candidate and question-level verification status counts, pair/permutation counts, and explicit `real_generation_performed=false`. `trainer_export_summary.json` stays within the existing public-evidence allowlist: `run_ids.export` holds the export run ID; `artifact_hashes` holds role-tagged `upstream_split`, `upstream_generation`, `upstream_pairs`, `upstream_permutations`, `prompt_template`, and `parquet` hashes; `completion_counts.rows` holds row count; and `phase_status` records the explicit-identity round-trip result. It contains no prompt or response text.
+Run the Task 17 E2E test, source/split/CLI focused tests, the existing trainer identity round-trip, Ruff, and `git diff --check`. A second complete Windows/WSL pytest log is not a separate acceptance deliverable. Request independent review of the branch plus the private-summary field allowlist. Keep the summary status `AWAITING_PHASE1_CODE_REVIEW` until review passes.
 
-`README.md` states:
+- [ ] **Step 7: Seal the one summary after review**
 
-```text
-Design: DESIGN_SPEC_APPROVED
-Implementation: AWAITING_PHASE1_CODE_REVIEW
-Real vLLM generation: NOT RUN
-Real smoke gates: NOT EVALUATED
-200-pair pilot: NOT AUTHORIZED
-```
-
-Commit the implemented scanner, its violation/non-self-trigger tests, and the pre-review evidence while the status remains `AWAITING_PHASE1_CODE_REVIEW`:
+After review passes, change only the summary status to `DATA_PIPELINE_SYSTEM_READY`, retain the explicit Phase 2 prohibitions, and commit:
 
 ```bash
-git add scripts_permstudy/data/validate_dataset.py tests_permstudy/data_pipeline/test_cli.py artifacts/data_pipeline/phase1
-git commit -m "test(data): record Phase 1 pre-review acceptance evidence"
+git add artifacts/data_pipeline/phase1/summary.json
+git commit -m "docs(data): record Phase 1 data readiness"
 ```
 
-- [ ] **Step 7: Request independent code review**
-
-Use the requesting-code-review skill against the complete branch diff from `main`. Resolve findings with new focused tests. Do not mark `DATA_PIPELINE_SYSTEM_READY` until review explicitly passes.
-
-- [ ] **Step 8: After review passes, seal Phase 1 evidence and commit**
-
-Update evidence status to `DATA_PIPELINE_SYSTEM_READY`, preserving the prohibitions on real-smoke claims. Update the design review checkpoint to link this implementation plan and Phase 1 evidence.
-
-```bash
-git add artifacts/data_pipeline/phase1 docs/superpowers/specs/2026-10-06-controlled-training-data-pipeline-design.md
-git commit -m "docs(data): record Phase 1 pipeline readiness evidence"
-```
-
-Run `git status --short`, `git diff --check main..HEAD`, and the full test suite once more before any merge request.
+Run `git status --short` and `git diff --check main..HEAD` before any merge request. The focused acceptance commands above, together with the already approved Task 1-16 suites, are the required Phase 1 evidence; do not create duplicate report files.
 
 ---
 
