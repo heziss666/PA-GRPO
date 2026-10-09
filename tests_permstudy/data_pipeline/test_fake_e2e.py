@@ -1,0 +1,174 @@
+"""One synthetic research path, including its real trainer identity consumer."""
+
+from collections import Counter
+import hashlib
+import json
+from pathlib import Path
+
+from omegaconf import OmegaConf
+import pyarrow.parquet as pq
+
+from permstudy.rollout_identity import (
+    attach_permutation_identity,
+    merge_identity_into_extra_infos,
+    repeat_for_rollout,
+)
+from scripts_permstudy.data import run_fake_e2e as e2e
+from tests_permstudy.data_pipeline.test_trainer_export import FakeTrainerTokenizer
+from verl import DataProto
+from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
+
+
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "data_pipeline"
+
+
+def test_synthetic_full_flow_preserves_research_semantics_and_trainer_identity(
+    tmp_path,
+):
+    # A missing stage, changed split, or lost resume/rollout identity breaks this path.
+    assert callable(getattr(e2e, "run_fake_e2e", None)), (
+        "Task 17 orchestration is missing"
+    )
+    summary = e2e.run_fake_e2e(tmp_path, FIXTURES)
+    assert summary.question_count == 80
+    assert summary.train_count == 72
+    assert summary.holdout_count == 8
+    assert summary.smoke_count == 40
+    assert summary.planned_count == summary.successful_count == 240
+    assert summary.historical_failure_count == 1
+    assert summary.interrupted is True
+    assert summary.successful_keys == summary.resumed_successful_keys
+    assert len(set(summary.successful_keys)) == 240
+    assert (
+        summary.semantic_candidate_set_hash
+        == summary.resumed_semantic_candidate_set_hash
+    )
+    assert summary.pair_hash == summary.resumed_pair_hash
+    assert summary.permutation_hash == summary.resumed_permutation_hash
+    assert summary.trainer_row_hash == summary.resumed_trainer_row_hash
+    assert summary.functional_passed is True
+    assert summary.audit_required_count == summary.audit_completed_count > 0
+    assert summary.statistical_status in {"PASS", "PASS_WITH_WARNINGS", "FAIL"}
+    assert "production" not in summary.public_summary().values()
+
+    def records(name):
+        return [
+            json.loads(line)
+            for line in (summary.private_root / name)
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+
+    questions = records("canonical/questions.jsonl")
+    assignments = records("canonical/assignments.jsonl")
+    smoke = records("canonical/smoke.jsonl")
+    pairs = records("canonical/pairs.jsonl")
+    permutations = records("canonical/permutations.jsonl")
+    verified = records("canonical/verifications.jsonl")
+    assert all(q["synthetic"] is True for q in questions)
+    assert Counter(q["source"] for q in questions) == {"math": 40, "reclor": 40}
+    assert Counter(q["gold_label"] for q in questions if q["source"] == "reclor") == {
+        "A": 10,
+        "B": 10,
+        "C": 10,
+        "D": 10,
+    }
+    assert Counter((a["source"], a["split"]) for a in assignments) == {
+        ("math", "train"): 36,
+        ("math", "internal_holdout"): 4,
+        ("reclor", "train"): 36,
+        ("reclor", "internal_holdout"): 4,
+    }
+    assert Counter(a["source"] for a in smoke) == {"math": 20, "reclor": 20}
+    assert all(a["split"] == "train" for a in smoke)
+    assert {v["verification_status"] for v in verified} == {
+        "correct",
+        "incorrect",
+        "invalid",
+        "ambiguous",
+        "error",
+    }
+    assert len(pairs) == summary.pair_count == 40
+    assert len({p["original_question_id"] for p in pairs}) == len(pairs)
+    assert Counter(p["source"] for p in pairs) == {"math": 20, "reclor": 20}
+    assert (
+        len(permutations)
+        == summary.permutation_count
+        == summary.trainer_row_count
+        == 80
+    )
+    assert all(
+        count == 2 for count in Counter(p["pair_id"] for p in permutations).values()
+    )
+
+    def canonical(payload):
+        return json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+
+    def payload_hash(rows):
+        return hashlib.sha256(
+            b"".join(
+                canonical({k: v for k, v in row.items() if k != "record_hash"}) + b"\n"
+                for row in rows
+            )
+        ).hexdigest()
+
+    assert (
+        summary.split_hash
+        == hashlib.sha256(
+            (summary.private_root / "canonical/split.canonical.jsonl").read_bytes()
+        ).hexdigest()
+    )
+    assert summary.pair_hash == payload_hash(
+        sorted(pairs, key=lambda p: p["original_question_id"])
+    )
+    assert summary.permutation_hash == payload_hash(
+        sorted(
+            permutations, key=lambda p: (p["original_question_id"], p["permutation_id"])
+        )
+    )
+    parquet_rows = pq.read_table(
+        summary.private_root / summary.trainer_relative_path
+    ).to_pylist()
+    assert (
+        summary.trainer_row_hash == hashlib.sha256(canonical(parquet_rows)).hexdigest()
+    )
+    assert summary.successful_keys == tuple(
+        sorted(
+            (c["plan"]["generation_run_id"], c["plan"]["candidate_id"])
+            for c in records("canonical/candidates.jsonl")
+        )
+    )
+
+    dataset = RLHFDataset(
+        data_files=str(summary.private_root / summary.trainer_relative_path),
+        tokenizer=FakeTrainerTokenizer(),
+        config=OmegaConf.create(
+            {
+                "prompt_key": "prompt",
+                "max_prompt_length": 4096,
+                "filter_overlong_prompts": False,
+                "truncation": "error",
+                "return_raw_chat": True,
+                "cache_dir": str(tmp_path / "trainer_cache"),
+            }
+        ),
+    )
+    assert len(dataset) == 80
+    loaded = collate_fn([dataset[0], dataset[1]])
+    batch = DataProto.from_single_dict(loaded)
+    attach_permutation_identity(batch, identity_mode="explicit")
+    repeated = repeat_for_rollout(batch, repeat_times=2, identity_mode="explicit")
+    reward_extra = merge_identity_into_extra_infos(repeated)
+    pair_id = pairs[0]["pair_id"]
+    assert [entry["pair_id"] for entry in reward_extra] == [pair_id] * 4
+    assert [entry["permutation_id"] for entry in reward_extra] == [0, 0, 1, 1]
+    assert [entry["rollout_slot"] for entry in reward_extra] == [0, 1, 0, 1]
+    assert [entry["ground_truth"] for entry in loaded["reward_model"]] == ["A", "B"]
+
+    public = summary.public_summary()
+    assert public["mode"] == "synthetic_fake"
+    assert public["count"] == 240
+    assert str(tmp_path) not in json.dumps(public)
+    assert "Synthetic" not in json.dumps(public)
