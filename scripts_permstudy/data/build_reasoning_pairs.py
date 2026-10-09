@@ -15,19 +15,33 @@ from permstudy.data_pipeline.schema import PairRecord
 
 def load_tokenizer(revision, root):
     from transformers import AutoTokenizer
+    from transformers.utils.hub import cached_file, extract_commit_hash
 
+    cache_dir = str(io.rooted(root, "cache/tokenizers"))
+    config_path = cached_file(
+        pairs.TOKENIZER_REPOSITORY,
+        "tokenizer_config.json",
+        revision=revision,
+        cache_dir=cache_dir,
+    )
+    if extract_commit_hash(config_path, None) != revision:
+        raise io.DependencyContractError()
     return AutoTokenizer.from_pretrained(
         pairs.TOKENIZER_REPOSITORY,
         revision=revision,
-        cache_dir=str(io.rooted(root, "cache/tokenizers")),
+        cache_dir=cache_dir,
         trust_remote_code=False,
     )
 
 
 def validate_tokenizer(tokenizer, revision):
+    commits = (
+        getattr(tokenizer, "init_kwargs", {}).get("_commit_hash"),
+        getattr(tokenizer, "_commit_hash", None),
+    )
     if (
         getattr(tokenizer, "name_or_path", None) != pairs.TOKENIZER_REPOSITORY
-        or getattr(tokenizer, "init_kwargs", {}).get("_commit_hash") != revision
+        or any(commit is not None and commit != revision for commit in commits)
         or not callable(getattr(tokenizer, "encode", None))
     ):
         raise io.DependencyContractError()

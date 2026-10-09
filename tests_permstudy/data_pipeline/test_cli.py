@@ -506,6 +506,99 @@ def test_verification_dispatch_writes_separate_records_and_rejects_bad_timeout(
     )
 
 
+def patch_tokenizer_dependencies(
+    monkeypatch, root, tokenizer, revision, *, resolved=...
+):
+    """Keep snapshot resolution and tokenizer loading offline at the dependency boundary."""
+    cache = str((root / "cache/tokenizers").resolve())
+    snapshot = str(Path(cache) / "snapshots" / revision / "tokenizer_config.json")
+    expected_revision = revision
+
+    def cached_file(repository, filename, *, revision, cache_dir):
+        assert repository == "Qwen/Qwen2.5-7B-Instruct"
+        assert filename == "tokenizer_config.json"
+        assert revision == expected_revision
+        assert cache_dir == cache
+        return snapshot
+
+    def extract_commit_hash(path, commit_hash):
+        assert path == snapshot
+        assert commit_hash is None
+        return expected_revision if resolved is ... else resolved
+
+    def from_pretrained(repository, *, revision, cache_dir, trust_remote_code):
+        assert repository == "Qwen/Qwen2.5-7B-Instruct"
+        assert revision == expected_revision
+        assert cache_dir == cache
+        assert trust_remote_code is False
+        if resolved is not ... and resolved != expected_revision:
+            pytest.fail("tokenizer must not load from an unverified snapshot")
+        return tokenizer
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(AutoTokenizer=SimpleNamespace(from_pretrained=from_pretrained)),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers.utils.hub",
+        SimpleNamespace(
+            cached_file=cached_file, extract_commit_hash=extract_commit_hash
+        ),
+    )
+
+
+def test_tokenizer_accepts_verified_snapshot_without_private_commit_metadata(
+    tmp_path, monkeypatch
+):
+    module = cli("build_reasoning_pairs")
+    tokenizer = SimpleNamespace(
+        name_or_path="Qwen/Qwen2.5-7B-Instruct",
+        init_kwargs={},
+        encode=lambda text, **kwargs: text.split(),
+    )
+    revision = "2" * 40
+    patch_tokenizer_dependencies(monkeypatch, tmp_path, tokenizer, revision)
+
+    loaded = module.load_tokenizer(revision, tmp_path)
+    module.validate_tokenizer(loaded, revision)
+    assert loaded.encode("one two", add_special_tokens=False) == ["one", "two"]
+
+
+@pytest.mark.parametrize("resolved", [None, "3" * 40])
+def test_tokenizer_rejects_unverified_snapshot_before_loading(
+    tmp_path, monkeypatch, resolved
+):
+    module = cli("build_reasoning_pairs")
+    patch_tokenizer_dependencies(
+        monkeypatch, tmp_path, SimpleNamespace(), "2" * 40, resolved=resolved
+    )
+    with pytest.raises(module.io.DependencyContractError):
+        module.load_tokenizer("2" * 40, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"name_or_path": "other/repository"},
+        {"encode": None},
+        {"init_kwargs": {"_commit_hash": "3" * 40}},
+        {"_commit_hash": "3" * 40},
+    ],
+)
+def test_tokenizer_rejects_conflicting_identity_or_invalid_encode(fields):
+    module = cli("build_reasoning_pairs")
+    attributes = {
+        "name_or_path": "Qwen/Qwen2.5-7B-Instruct",
+        "init_kwargs": {"_commit_hash": "2" * 40},
+        "encode": lambda text, **kwargs: text.split(),
+    }
+    attributes.update(fields)
+    with pytest.raises(module.io.DependencyContractError):
+        module.validate_tokenizer(SimpleNamespace(**attributes), "2" * 40)
+
+
 def test_pair_dispatch_requires_pinned_actual_tokenizer_and_selects_real_pairs(
     verified, monkeypatch
 ):
@@ -527,9 +620,7 @@ def test_pair_dispatch_requires_pinned_actual_tokenizer_and_selects_real_pairs(
             assert add_special_tokens is False
             return text.split()
 
-    monkeypatch.setattr(
-        module, "load_tokenizer", lambda revision, root: Tokenizer(), raising=False
-    )
+    patch_tokenizer_dependencies(monkeypatch, root, Tokenizer(), "2" * 40)
     assert module.main(args + ["--tokenizer-revision", "2" * 40]) == 0
     path = next((root / "pairs").glob("*/manifest.json"))
     payload = json.loads(path.read_text())
@@ -549,14 +640,15 @@ def test_pair_dispatch_requires_pinned_actual_tokenizer_and_selects_real_pairs(
         )
         == 0
     )
-    monkeypatch.setattr(
-        module,
-        "load_tokenizer",
-        lambda revision, root: SimpleNamespace(
+    patch_tokenizer_dependencies(
+        monkeypatch,
+        root,
+        SimpleNamespace(
             name_or_path="other/repository",
-            init_kwargs={"_commit_hash": revision},
+            init_kwargs={"_commit_hash": "3" * 40},
             encode=Tokenizer().encode,
         ),
+        "3" * 40,
     )
     assert module.main(args + ["--tokenizer-revision", "3" * 40]) == 4
 
@@ -570,7 +662,7 @@ def paired(verified, monkeypatch):
         init_kwargs={"_commit_hash": "2" * 40},
         encode=lambda text, **kwargs: text.split(),
     )
-    monkeypatch.setattr(module, "load_tokenizer", lambda revision, root: tokenizer)
+    patch_tokenizer_dependencies(monkeypatch, root, tokenizer, "2" * 40)
     assert (
         module.main(
             [
