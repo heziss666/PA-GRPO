@@ -48,6 +48,7 @@ class GenerationShardPlan:
     generator_config: GenerationConfig
     shard_id: str
     candidates: tuple[CandidatePlan, ...]
+    split_upstream_manifest_hash: str
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,7 @@ def build_generation_shard_plan(
         generator_config=configs[generator_id],
         shard_id=shard_id,
         candidates=candidates,
+        split_upstream_manifest_hash=plan.split_upstream_manifest_hash,
     )
     _validate_shard_plan(shard)
     return shard
@@ -241,6 +243,7 @@ def _validate_generation_plan(plan: GenerationPlan) -> None:
             plan.generator_configs,
             samples_per_question=samples,
             shard_size=plan.shard_size,
+            split_upstream_manifest_hash=plan.split_upstream_manifest_hash,
         )
     except (TypeError, ValueError) as error:
         raise RunMismatchError("generation plan config is invalid") from error
@@ -275,6 +278,7 @@ def _validate_shard_plan(plan: GenerationShardPlan) -> None:
         shard_ids=(f"{plan.generator_config.generator_id}/{plan.shard_id}",),
         generator_configs=plan.generator_configs,
         shard_size=plan.shard_size,
+        split_upstream_manifest_hash=plan.split_upstream_manifest_hash,
     )
     # Validate the run/config namespace against the complete recipe. Candidate
     # coverage is shard-local, so validate its identity separately below.
@@ -284,6 +288,7 @@ def _validate_shard_plan(plan: GenerationShardPlan) -> None:
             plan.generator_configs,
             samples_per_question=samples,
             shard_size=plan.shard_size,
+            split_upstream_manifest_hash=plan.split_upstream_manifest_hash,
         )
     except (TypeError, ValueError) as error:
         raise RunMismatchError("shard plan config is invalid") from error
@@ -505,8 +510,8 @@ def _manifest_identity(plan: GenerationShardPlan) -> dict[str, object]:
         "prompt_template_revision": config.prompt_template_revision,
         "prompt_template_hash": config.prompt_template_hash,
         "split_manifest_hash": config.split_manifest_hash,
-        "upstream_bindings": {"split": config.split_manifest_hash},
-        "upstream_manifest_hashes": [config.split_manifest_hash],
+        "upstream_bindings": {"split": plan.split_upstream_manifest_hash},
+        "upstream_manifest_hashes": [plan.split_upstream_manifest_hash],
         "planned_candidate_keys_hash": _planned_keys_hash(plan),
     }
 

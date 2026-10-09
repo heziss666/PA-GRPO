@@ -153,6 +153,24 @@ def test_generator_revisions_must_be_immutable_sha_values():
     assert GenerationConfig.from_dict(valid.to_dict()) == valid
 
 
+def test_explicit_split_envelope_preserves_canonical_digest_and_legacy_namespace():
+    from permstudy.data_pipeline.generation import generation_stage_config, plan_generation
+
+    configs = generator_configs()
+    legacy = plan_generation(assignments(), configs)
+    compatible = plan_generation(assignments(), configs, split_upstream_manifest_hash=SPLIT_HASH)
+    assert compatible == legacy
+    first = plan_generation(assignments(), configs, split_upstream_manifest_hash="c" * 64)
+    second = plan_generation(assignments(), configs, split_upstream_manifest_hash="d" * 64)
+    assert first.generation_run_id != second.generation_run_id != legacy.generation_run_id
+    assert first.config_hash != second.config_hash != legacy.config_hash
+    assert {item.split_manifest_hash for item in first.candidates + second.candidates} == {SPLIT_HASH}
+    typed = generation_stage_config(configs, samples_per_question=2, shard_size=8,
+                                    split_upstream_manifest_hash="c" * 64)
+    assert typed["upstream_bindings"] == {"split": "c" * 64}
+    assert first.split_upstream_manifest_hash == "c" * 64
+
+
 def test_fake_backend_emits_success_retryable_failure_and_length_result():
     from permstudy.data_pipeline.generation import FakeGenerationBackend, GenerationResult, plan_generation
 

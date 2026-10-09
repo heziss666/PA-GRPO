@@ -103,6 +103,25 @@ class NoCallBackend:
         raise AssertionError("backend must not be called")
 
 
+def test_runner_distinguishes_split_bytes_from_envelope_and_rejects_changed_resume(tmp_path):
+    from permstudy.data_pipeline.generation import (
+        RunMismatchError, build_generation_shard_plan, plan_generation, run_generation_shard,
+    )
+
+    full = plan_generation(assignments(1), (generation_config(),), split_upstream_manifest_hash="c" * 64)
+    shard = build_generation_shard_plan(full, GENERATOR_ID, "00000")
+    output = tmp_path / "shard"
+    run_generation_shard(shard, ScriptedBackend(["success", "success"]), output)
+    stored = json.loads((output / "manifest.json").read_text())
+    assert stored["split_manifest_hash"] == SPLIT_HASH
+    assert stored["upstream_bindings"] == {"split": "c" * 64}
+    assert stored["upstream_manifest_hashes"] == ["c" * 64]
+    run_generation_shard(shard, NoCallBackend(), output)
+    changed = plan_generation(assignments(1), (generation_config(),), split_upstream_manifest_hash="d" * 64)
+    with pytest.raises(RunMismatchError):
+        run_generation_shard(build_generation_shard_plan(changed, GENERATOR_ID, "00000"), NoCallBackend(), output)
+
+
 def read_business_records(path, record_type):
     if not path.exists():
         return []

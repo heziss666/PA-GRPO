@@ -138,6 +138,7 @@ class GenerationPlan:
     shard_ids: tuple[str, ...]
     generator_configs: tuple[GenerationConfig, ...]
     shard_size: int
+    split_upstream_manifest_hash: str
 
 
 @dataclass(frozen=True)
@@ -159,10 +160,11 @@ def generation_stage_config(
     *,
     samples_per_question: int,
     shard_size: int,
+    split_upstream_manifest_hash: str | None = None,
 ) -> dict[str, object]:
     """Bind the full generation recipe to its role-tagged split manifest."""
     configs = _validated_configs(generators, samples_per_question)
-    split_hash = configs[0].split_manifest_hash
+    split_hash = configs[0].split_manifest_hash if split_upstream_manifest_hash is None else split_upstream_manifest_hash
     return role_bound_stage_config(
         {
             "generation_plan_schema": GENERATION_PLAN_SCHEMA,
@@ -180,6 +182,8 @@ def plan_generation(
     generators: Sequence[GenerationConfig],
     samples_per_question: int = 2,
     shard_size: int = 8,
+    *,
+    split_upstream_manifest_hash: str | None = None,
 ) -> GenerationPlan:
     """Create deterministic run-scoped candidate plans and per-generator shards."""
     if type(samples_per_question) is not int or samples_per_question <= 0:
@@ -193,6 +197,7 @@ def plan_generation(
         configs,
         samples_per_question=samples_per_question,
         shard_size=shard_size,
+        split_upstream_manifest_hash=split_upstream_manifest_hash,
     )
     generation_run_id = run_id("generation", typed_config)
     config_hash = sha256_hex(canonical_json_bytes(typed_config))
@@ -236,6 +241,7 @@ def plan_generation(
         shard_ids=tuple(shard_ids),
         generator_configs=configs,
         shard_size=shard_size,
+        split_upstream_manifest_hash=typed_config["upstream_bindings"]["split"],
     )
 
 
