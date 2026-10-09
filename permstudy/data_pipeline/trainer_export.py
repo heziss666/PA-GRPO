@@ -30,6 +30,15 @@ PROMPT_TEMPLATE_VERSION = "pairwise_judge_direct_v1"
 ROW_SCHEMA_VERSION = "trainer_pairwise_parquet_v1"
 EXPORT_CONFIG_SCHEMA = "trainer_export_config_v1"
 
+SYSTEM_PROMPT_TEMPLATE = "Reply with only A or B."
+USER_PROMPT_TEMPLATE = (
+    "Question:\n{rendered_question}\n\n"
+    "Response A:\n{response_a}\n\n"
+    "Response B:\n{response_b}\n\n"
+    "Which response is more correct?\n"
+    "Answer with A or B only."
+)
+
 _EXPORT_UPSTREAM_ROLES = frozenset({"split", "generation", "pairs", "permutations"})
 _ARTIFACT_BASENAMES = {
     "split": "questions.jsonl",
@@ -62,18 +71,27 @@ _EXTRA_INFO_FIELDS = frozenset(
 )
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-_PROMPT_TEMPLATE_CONTRACT = {
-    "system": "Reply with only A or B.",
-    "user_sections": (
-        "Question",
-        "Response A",
-        "Response B",
-        "Which response is more correct?",
-        "Answer with A or B only.",
-    ),
-    "version": PROMPT_TEMPLATE_VERSION,
-}
-PROMPT_TEMPLATE_HASH = sha256_hex(canonical_json_bytes(_PROMPT_TEMPLATE_CONTRACT))
+
+
+def prompt_template_hash(system_template: str, user_template: str) -> str:
+    """Hash every exact static byte that controls direct-judge rendering."""
+    if not isinstance(system_template, str) or not isinstance(user_template, str):
+        raise TypeError("prompt templates must be strings")
+    return sha256_hex(
+        canonical_json_bytes(
+            {
+                "system_template": system_template,
+                "user_template": user_template,
+                "version": PROMPT_TEMPLATE_VERSION,
+            }
+        )
+    )
+
+
+PROMPT_TEMPLATE_HASH = prompt_template_hash(
+    SYSTEM_PROMPT_TEMPLATE,
+    USER_PROMPT_TEMPLATE,
+)
 
 
 class TrainerExportIntegrityError(ValueError):
@@ -102,14 +120,27 @@ class _BoundManifest:
     run_id: str
     output_manifest_hash: str
     artifacts: tuple[ArtifactRef, ...]
+    upstream_manifest_hashes: tuple[str, ...]
+    upstream_bindings: Mapping[str, str] | None
 
 
 def export_stage_config(upstream_bindings: Mapping[str, str]) -> dict[str, object]:
     """Bind trainer export identity to all canonical upstream roles."""
+    return _export_stage_config(upstream_bindings, PROMPT_TEMPLATE_HASH)
+
+
+def _export_stage_config(
+    upstream_bindings: Mapping[str, str],
+    exact_prompt_template_hash: str,
+) -> dict[str, object]:
+    if not isinstance(exact_prompt_template_hash, str) or not _HASH.fullmatch(
+        exact_prompt_template_hash
+    ):
+        raise ValueError("prompt template hash must be a lowercase SHA256 value")
     return role_bound_stage_config(
         {
             "export_config_schema": EXPORT_CONFIG_SCHEMA,
-            "prompt_template_hash": PROMPT_TEMPLATE_HASH,
+            "prompt_template_hash": exact_prompt_template_hash,
             "prompt_template_version": PROMPT_TEMPLATE_VERSION,
             "row_schema_version": ROW_SCHEMA_VERSION,
         },
@@ -129,15 +160,13 @@ def render_pairwise_judge_prompt(
         raise TypeError("responses must be strings")
     rendered_question = _render_question(question)
     return [
-        {"role": "system", "content": "Reply with only A or B."},
+        {"role": "system", "content": SYSTEM_PROMPT_TEMPLATE},
         {
             "role": "user",
-            "content": (
-                f"Question:\n{rendered_question}\n\n"
-                f"Response A:\n{normalize_text_v1(response_a)}\n\n"
-                f"Response B:\n{normalize_text_v1(response_b)}\n\n"
-                "Which response is more correct?\n"
-                "Answer with A or B only."
+            "content": USER_PROMPT_TEMPLATE.format(
+                rendered_question=rendered_question,
+                response_a=normalize_text_v1(response_a),
+                response_b=normalize_text_v1(response_b),
             ),
         },
     ]
@@ -332,6 +361,7 @@ def export_trainer_parquet(
     root = Path(output_dir).resolve()
     validate_external_to_repository(_REPOSITORY_ROOT, root)
     manifests = _validate_upstream_manifests(upstream_manifests)
+    _validate_cross_manifest_lineage(manifests)
     records = {
         role: _read_role_records(root, role, manifest)
         for role, manifest in manifests.items()
@@ -616,10 +646,62 @@ def _validate_upstream_manifests(
             raise TrainerExportIntegrityError(
                 f"{role} manifest envelope hash is invalid"
             )
+        raw_bindings = payload.get("upstream_bindings")
+        if raw_bindings is None:
+            bindings = None
+        elif isinstance(raw_bindings, Mapping):
+            bindings = {
+                key: value
+                for key, value in raw_bindings.items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+            if (
+                len(bindings) != len(raw_bindings)
+                or any(not key.strip() for key in bindings)
+                or any(not _HASH.fullmatch(value) for value in bindings.values())
+                or not set(bindings.values()).issubset(
+                    set(core.upstream_manifest_hashes)
+                )
+            ):
+                raise TrainerExportIntegrityError(
+                    f"{role} manifest role-tagged upstream bindings are invalid"
+                )
+            bindings = MappingProxyType(bindings)
+        else:
+            raise TrainerExportIntegrityError(
+                f"{role} manifest role-tagged upstream bindings are invalid"
+            )
         validated[role] = _BoundManifest(
-            core.run_id, core.output_manifest_hash, core.artifacts
+            core.run_id,
+            core.output_manifest_hash,
+            core.artifacts,
+            core.upstream_manifest_hashes,
+            bindings,
         )
     return validated
+
+
+def _validate_cross_manifest_lineage(
+    manifests: Mapping[str, _BoundManifest],
+) -> None:
+    for downstream_role, upstream_role in (
+        ("generation", "split"),
+        ("pairs", "generation"),
+        ("permutations", "pairs"),
+    ):
+        downstream = manifests[downstream_role]
+        expected_hash = manifests[upstream_role].output_manifest_hash
+        if expected_hash not in downstream.upstream_manifest_hashes:
+            raise TrainerExportIntegrityError(
+                f"{downstream_role} manifest does not bind the supplied {upstream_role} manifest"
+            )
+        if (
+            downstream.upstream_bindings is not None
+            and downstream.upstream_bindings.get(upstream_role) != expected_hash
+        ):
+            raise TrainerExportIntegrityError(
+                f"{downstream_role} manifest role binding contradicts the supplied {upstream_role} manifest"
+            )
 
 
 def _validate_record_run_lineage(

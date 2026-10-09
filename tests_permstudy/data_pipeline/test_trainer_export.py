@@ -323,7 +323,34 @@ def test_export_stage_config_role_binds_all_upstreams_and_template_contract():
     assert run_id("trainer_export", baseline) != run_id("trainer_export", swapped)
 
 
-def _write_upstream_manifest(data_root, role, filename, records):
+def test_exact_prompt_template_change_changes_hash_and_export_run_id():
+    from permstudy.data_pipeline import trainer_export
+    from permstudy.data_pipeline.ids import run_id
+
+    bindings = {
+        "split": "1" * 64,
+        "generation": "2" * 64,
+        "pairs": "3" * 64,
+        "permutations": "4" * 64,
+    }
+    changed_template = trainer_export.USER_PROMPT_TEMPLATE.replace(
+        "Question:\n{rendered_question}",
+        "Question:\n\n{rendered_question}",
+    )
+    changed_hash = trainer_export.prompt_template_hash(
+        trainer_export.SYSTEM_PROMPT_TEMPLATE,
+        changed_template,
+    )
+    baseline = trainer_export.export_stage_config(bindings)
+    changed = trainer_export._export_stage_config(bindings, changed_hash)
+
+    assert changed_hash != trainer_export.PROMPT_TEMPLATE_HASH
+    assert run_id("trainer_export", baseline) != run_id("trainer_export", changed)
+
+
+def _write_upstream_manifest(
+    data_root, role, filename, records, *, upstream_manifest_hashes=()
+):
     from permstudy.data_pipeline.io import (
         append_record,
         scan_jsonl,
@@ -349,7 +376,7 @@ def _write_upstream_manifest(data_root, role, filename, records):
         "stage": role,
         "run_id": run_identity,
         "config_hash": sha256_hex(f"{role}:config".encode()),
-        "upstream_manifest_hashes": [],
+        "upstream_manifest_hashes": list(upstream_manifest_hashes),
         "artifacts": [
             {
                 "relative_path": artifact_path.relative_to(data_root).as_posix(),
@@ -370,20 +397,33 @@ def _write_upstream_manifest(data_root, role, filename, records):
 
 def _write_upstreams(data_root):
     questions, candidates, pairs, permutations = _records()
+    split = _write_upstream_manifest(data_root, "split", "questions.jsonl", questions)
+    generation = _write_upstream_manifest(
+        data_root,
+        "generation",
+        "candidates.jsonl",
+        candidates,
+        upstream_manifest_hashes=(split.output_manifest_hash,),
+    )
+    pairs_manifest = _write_upstream_manifest(
+        data_root,
+        "pairs",
+        "pairs.jsonl",
+        pairs,
+        upstream_manifest_hashes=(generation.output_manifest_hash,),
+    )
+    permutation_manifest = _write_upstream_manifest(
+        data_root,
+        "permutations",
+        "permutations.jsonl",
+        permutations,
+        upstream_manifest_hashes=(pairs_manifest.output_manifest_hash,),
+    )
     return {
-        "split": _write_upstream_manifest(
-            data_root, "split", "questions.jsonl", questions
-        ),
-        "generation": _write_upstream_manifest(
-            data_root, "generation", "candidates.jsonl", candidates
-        ),
-        "pairs": _write_upstream_manifest(data_root, "pairs", "pairs.jsonl", pairs),
-        "permutations": _write_upstream_manifest(
-            data_root,
-            "permutations",
-            "permutations.jsonl",
-            permutations,
-        ),
+        "split": split,
+        "generation": generation,
+        "pairs": pairs_manifest,
+        "permutations": permutation_manifest,
     }
 
 
@@ -438,8 +478,23 @@ def test_export_accepts_hash_valid_extended_manifest_envelopes(tmp_path):
     extended = json.loads(generation_path.read_text(encoding="utf-8"))
     extended["generation_run_id"] = GENERATION_RUN_ID
     extended["backend"] = "fake"
+    extended["upstream_bindings"] = {"split": manifests["split"].output_manifest_hash}
     write_atomic_manifest(generation_path, extended)
     manifests["generation"] = json.loads(generation_path.read_text(encoding="utf-8"))
+    pair_path = tmp_path / "upstreams" / "pairs" / "manifest.json"
+    pair_manifest = json.loads(pair_path.read_text(encoding="utf-8"))
+    pair_manifest["upstream_manifest_hashes"] = [
+        manifests["generation"]["output_manifest_hash"]
+    ]
+    write_atomic_manifest(pair_path, pair_manifest)
+    manifests["pairs"] = json.loads(pair_path.read_text(encoding="utf-8"))
+    permutation_path = tmp_path / "upstreams" / "permutations" / "manifest.json"
+    permutation_manifest = json.loads(permutation_path.read_text(encoding="utf-8"))
+    permutation_manifest["upstream_manifest_hashes"] = [
+        manifests["pairs"]["output_manifest_hash"]
+    ]
+    write_atomic_manifest(permutation_path, permutation_manifest)
+    manifests["permutations"] = json.loads(permutation_path.read_text(encoding="utf-8"))
 
     summary = export_trainer_parquet(manifests, tmp_path)
 
@@ -448,6 +503,66 @@ def test_export_accepts_hash_valid_extended_manifest_envelopes(tmp_path):
         summary.upstream_bindings["generation"]
         == manifests["generation"]["output_manifest_hash"]
     )
+
+
+@pytest.mark.parametrize(
+    ("downstream_role", "upstream_role"),
+    [
+        ("generation", "split"),
+        ("pairs", "generation"),
+        ("permutations", "pairs"),
+    ],
+)
+def test_export_rejects_rehashed_manifest_with_wrong_direct_upstream(
+    tmp_path, downstream_role, upstream_role
+):
+    from permstudy.data_pipeline.io import write_atomic_manifest
+    from permstudy.data_pipeline.trainer_export import (
+        TrainerExportIntegrityError,
+        export_trainer_parquet,
+    )
+
+    manifests = _write_upstreams(tmp_path)
+    manifest_path = tmp_path / "upstreams" / downstream_role / "manifest.json"
+    contradictory = json.loads(manifest_path.read_text(encoding="utf-8"))
+    contradictory["upstream_manifest_hashes"] = ["f" * 64]
+    write_atomic_manifest(manifest_path, contradictory)
+    manifests[downstream_role] = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    with pytest.raises(
+        TrainerExportIntegrityError,
+        match=f"{downstream_role}.*{upstream_role}",
+    ):
+        export_trainer_parquet(manifests, tmp_path)
+
+
+def test_export_rejects_absent_or_role_contradictory_lineage_evidence(tmp_path):
+    from permstudy.data_pipeline.io import write_atomic_manifest
+    from permstudy.data_pipeline.trainer_export import (
+        TrainerExportIntegrityError,
+        export_trainer_parquet,
+    )
+
+    manifests = _write_upstreams(tmp_path)
+    pair_path = tmp_path / "upstreams" / "pairs" / "manifest.json"
+    absent = json.loads(pair_path.read_text(encoding="utf-8"))
+    absent["upstream_manifest_hashes"] = []
+    write_atomic_manifest(pair_path, absent)
+    manifests["pairs"] = json.loads(pair_path.read_text(encoding="utf-8"))
+    with pytest.raises(TrainerExportIntegrityError, match="pairs.*generation"):
+        export_trainer_parquet(manifests, tmp_path)
+
+    role_root = tmp_path / "role_tagged"
+    manifests = _write_upstreams(role_root)
+    permutation_path = role_root / "upstreams" / "permutations" / "manifest.json"
+    contradictory = json.loads(permutation_path.read_text(encoding="utf-8"))
+    actual_pair_hash = manifests["pairs"].output_manifest_hash
+    contradictory["upstream_manifest_hashes"] = [actual_pair_hash, "f" * 64]
+    contradictory["upstream_bindings"] = {"pairs": "f" * 64}
+    write_atomic_manifest(permutation_path, contradictory)
+    manifests["permutations"] = json.loads(permutation_path.read_text(encoding="utf-8"))
+    with pytest.raises(TrainerExportIntegrityError, match="role binding.*pairs"):
+        export_trainer_parquet(manifests, role_root)
 
 
 def test_export_rejects_record_run_identity_not_bound_by_its_manifest(tmp_path):
@@ -463,6 +578,13 @@ def test_export_rejects_record_run_identity_not_bound_by_its_manifest(tmp_path):
     mismatched["run_id"] = "f" * 64
     write_atomic_manifest(pair_path, mismatched)
     manifests["pairs"] = json.loads(pair_path.read_text(encoding="utf-8"))
+    permutation_path = tmp_path / "upstreams" / "permutations" / "manifest.json"
+    permutation_manifest = json.loads(permutation_path.read_text(encoding="utf-8"))
+    permutation_manifest["upstream_manifest_hashes"] = [
+        manifests["pairs"]["output_manifest_hash"]
+    ]
+    write_atomic_manifest(permutation_path, permutation_manifest)
+    manifests["permutations"] = json.loads(permutation_path.read_text(encoding="utf-8"))
 
     with pytest.raises(TrainerExportIntegrityError, match="pair run lineage"):
         export_trainer_parquet(manifests, tmp_path)
