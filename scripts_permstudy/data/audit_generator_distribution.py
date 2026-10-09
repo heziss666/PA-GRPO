@@ -33,15 +33,21 @@ def rebuild_selection(root, verification, seed):
         gold,
         generation["run_id"],
         audit_seed=seed,
+        verification_manifest_hash=verification["output_manifest_hash"],
         integrity=True,
     )
+    snapshot_hash = audit.verification_snapshot_hash(verified, gold)
     config = io.checked(
         audit.audit_stage_config,
         generation["run_id"],
         verification["run_id"],
-        verification["output_manifest_hash"],
+        snapshot_hash,
         audit_seed=seed,
+        verification_manifest_hash=verification["output_manifest_hash"],
     )
+    identity = run_id("audit", config)
+    if any(item.audit_run_id != identity for item in selection):
+        raise io.IntegrityError()
     return config, selection
 
 

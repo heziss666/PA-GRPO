@@ -281,11 +281,23 @@ def test_audit_stage_config_role_binds_verification_snapshot():
         audit_seed=42,
         max_per_cell=5,
     )
+    changed_manifest = audit_stage_config(
+        GENERATION_RUN_ID,
+        VERIFICATION_RUN_ID,
+        snapshot_hash,
+        audit_seed=42,
+        max_per_cell=5,
+        verification_manifest_hash="5" * 64,
+    )
 
     assert baseline["parameters"]["verification_run_id"] == VERIFICATION_RUN_ID
+    assert baseline["parameters"]["audit_config_schema"] == "verifier_audit_config_v2"
+    assert baseline["parameters"]["verification_snapshot_hash"] == snapshot_hash
     assert baseline["upstream_bindings"] == {"verification": snapshot_hash}
+    assert changed_manifest["upstream_bindings"] == {"verification": "5" * 64}
     assert run_id("audit", baseline) == run_id("audit", repeated)
     assert run_id("audit", baseline) != run_id("audit", changed_snapshot)
+    assert run_id("audit", baseline) != run_id("audit", changed_manifest)
 
 
 @pytest.mark.parametrize(

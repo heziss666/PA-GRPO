@@ -18,7 +18,7 @@ from .schema import (
 )
 
 
-AUDIT_CONFIG_SCHEMA = "verifier_audit_config_v1"
+AUDIT_CONFIG_SCHEMA = "verifier_audit_config_v2"
 AUDIT_SAMPLE_SCORE_SCHEMA = "audit_sample_score_v1"
 AUDIT_VERIFICATION_SNAPSHOT_SCHEMA = "audit_verification_snapshot_v1"
 
@@ -93,8 +93,10 @@ def audit_stage_config(
     verification_snapshot_hash: str,
     audit_seed: int = 42,
     max_per_cell: int = 5,
+    *,
+    verification_manifest_hash: str | None = None,
 ) -> dict[str, object]:
-    """Bind deterministic audit sampling to the exact verified record snapshot."""
+    """Bind audit sampling to both the manifest lineage and record snapshot."""
     if not isinstance(generation_run_id, str) or not generation_run_id.strip():
         raise ValueError("generation_run_id must be nonempty text")
     if not isinstance(verification_run_id, str) or not verification_run_id.strip():
@@ -103,6 +105,11 @@ def audit_stage_config(
         raise ValueError("audit_seed must be a nonnegative integer")
     if type(max_per_cell) is not int or max_per_cell <= 0:
         raise ValueError("max_per_cell must be a positive integer")
+    manifest_hash = (
+        verification_snapshot_hash
+        if verification_manifest_hash is None
+        else verification_manifest_hash
+    )
     return role_bound_stage_config(
         {
             "audit_config_schema": AUDIT_CONFIG_SCHEMA,
@@ -110,8 +117,9 @@ def audit_stage_config(
             "generation_run_id": generation_run_id,
             "max_per_cell": max_per_cell,
             "verification_run_id": verification_run_id,
+            "verification_snapshot_hash": verification_snapshot_hash,
         },
-        {"verification": verification_snapshot_hash},
+        {"verification": manifest_hash},
         _AUDIT_UPSTREAM_ROLES,
     )
 
@@ -122,6 +130,8 @@ def build_audit_selection(
     generation_run_id: str,
     audit_seed: int = 42,
     max_per_cell: int = 5,
+    *,
+    verification_manifest_hash: str | None = None,
 ) -> list[AuditSelectionRecord]:
     """Select all exceptional outcomes and sampled binary outcomes."""
     candidates, questions, verification_run_id = _validate_verification_inputs(
@@ -129,16 +139,17 @@ def build_audit_selection(
         question_records,
         generation_run_id,
     )
-    verification_snapshot_hash = _verification_snapshot_hash(
+    snapshot_hash = verification_snapshot_hash(
         candidates,
         tuple(questions.values()),
     )
     typed_config = audit_stage_config(
         generation_run_id,
         verification_run_id,
-        verification_snapshot_hash,
+        snapshot_hash,
         audit_seed,
         max_per_cell,
+        verification_manifest_hash=verification_manifest_hash,
     )
     audit_run_id = run_id("audit", typed_config)
 
@@ -333,7 +344,7 @@ def _sample_score(record: VerificationRecord, audit_seed: int) -> str:
     )
 
 
-def _verification_snapshot_hash(
+def verification_snapshot_hash(
     candidates: Sequence[VerificationRecord],
     questions: Sequence[QuestionVerificationRecord],
 ) -> str:

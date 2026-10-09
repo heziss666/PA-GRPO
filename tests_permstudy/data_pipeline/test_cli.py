@@ -746,6 +746,10 @@ def test_audit_rebuilds_selection_and_requires_exact_decisions(verified):
         )
         for row in scan_jsonl(selection_path).records
     ]
+    audit_manifest = json.loads(
+        next((root / "audit").glob("*/manifest.json")).read_text()
+    )
+    assert {item.audit_run_id for item in selection} == {audit_manifest["run_id"]}
     assert (
         len(selection) == 50
     )  # 20 gold failures and 5 per binary source/generator/status cell.
