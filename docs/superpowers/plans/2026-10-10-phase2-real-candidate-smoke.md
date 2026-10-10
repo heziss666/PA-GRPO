@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Phase 1 is complete and frozen at `main@34ef6f4`; do not change `permstudy/data_pipeline/` semantics, existing manifests, audit rules, gates, parsers, verifiers, pair selection, or trainer export to make the real smoke pass.
+- Phase 1 is complete and frozen at `main@34ef6f4`; do not change `permstudy/data_pipeline/`, `scripts_permstudy/data/`, or their Phase 1 tests, manifests, audit rules, gates, parsers, verifiers, pair selection, and trainer export to make the real smoke pass.
 - This document does not authorize AutoDL rental, model downloads, vLLM startup, candidate generation, or the 200-pair pilot.
 - The smoke contains exactly 20 MATH and 20 ReClor questions selected by the approved Phase 1 split, three immutable generators, and two samples per question: `40 × 3 × 2 = 240` planned candidate identities.
 - The approved generators and revisions are:
@@ -45,18 +45,24 @@ The existing Phase 1 interfaces are intentionally safe by default:
 
 - `scripts_permstudy/data/plan_generation.py` rejects non-fake generator configs;
 - `scripts_permstudy/data/generate_candidates.py` rejects `--backend vllm`;
+- `verify_candidates.py` calls the fake-only `load_plan()`, and the later formal CLI loading chain is consequently not a valid consumer of a `backend="vllm"` generation manifest;
 - `VLLMGenerationBackend` requires an injected `engine_factory` and never starts a model by itself.
 
-Before any GPU use, P1 must therefore add exactly one Phase 2-specific launcher, preferably `scripts_permstudy/phase2/run_real_smoke_generation.py`, plus focused CPU tests using a fake injected vLLM module. The launcher may call the existing `GenerationConfig`, `plan_generation`, `VLLMGenerationBackend`, `run_generation_shard`, artifact writers, and integrity validators. It must not modify or bypass the frozen Phase 1 CLI guards, create a second manifest format, duplicate verification/audit/gate logic, or write real content to Git. Its only responsibilities are:
+Before any GPU use, P1 must therefore add exactly one Phase 2-specific entry point, preferably `scripts_permstudy/phase2/run_real_smoke.py`, plus focused CPU tests using a fake injected vLLM module. The entry point owns the real-run orchestration from planning through export and exposes small subcommands such as `plan`, `generate`, `verify`, `audit`, and `finalize`. It consumes existing package APIs directly; it must not call the fake-only Phase 1 loaders for a real run.
+
+The entry point may call `GenerationConfig`, `plan_generation`, `VLLMGenerationBackend`, `run_generation_shard`, `verify_math_question`, `verify_reclor_question`, `build_audit_selection`, `validate_audit_decisions`, `select_pair`, `build_permutations`, `evaluate_functional_gate`, `evaluate_statistical_gate`, `export_trainer_parquet`, and the existing artifact writers and integrity validators. It must not modify or bypass the frozen Phase 1 CLI guards, create a second manifest format, reimplement those algorithms, or write real content to Git. Its only orchestration responsibilities are:
 
 1. load the approved split and question artifacts from `PAGRPO_DATA_ROOT`;
 2. render and hash the exact source-specific candidate prompt templates below;
 3. construct the three `backend="vllm"` generation configs;
-4. inject a real vLLM engine factory;
-5. execute one requested generator shard through the existing append-only runner;
-6. emit only existing generation artifacts and sanitized progress.
+4. inject a real vLLM engine factory and retain one engine for the lifetime of one generator process;
+5. loop over all pending shards for one requested generator through the existing append-only runner;
+6. load real candidate records and invoke the existing package verification, audit, pair, permutation, gate, and trainer-export functions;
+7. emit only the existing artifact schemas and sanitized progress.
 
-P1 review must prove, without a GPU, that request IDs map back to the correct `(generation_run_id, candidate_id)`, prompt selection is source-correct, return order is irrelevant, foreign or missing vLLM results fail closed, and resume requests only missing composite candidate keys.
+`VLLMGenerationBackend.generate()` calls `engine_factory` for every batch. The injected factory must therefore be a process-local caching closure that returns the same already-loaded engine for every batch and shard of that generator. The launcher must process all pending shards for that generator before destroying the engine. A process crash may construct one replacement engine and resume missing composite keys; normal shard progression must not reload weights. P1 tests belong under a new Phase 2-specific test path, such as `tests_permstudy/phase2/`, so the protected Phase 1 test tree remains unchanged.
+
+P1 review must prove, without a GPU, that request IDs map back to the correct `(generation_run_id, candidate_id)`, prompt selection is source-correct, return order is irrelevant, foreign or missing vLLM results fail closed, resume requests only missing composite candidate keys, and one fake engine instance is reused across multiple batches and shards. It must also run one synthetic package-API integration path from vLLM-shaped candidate records through verification, audit decisions, pair selection, AB/BA, Functional/Statistical Gates, trainer Parquet export, and the existing trainer identity round trip. This test proves the real entry point never falls back to the fake-only Phase 1 CLI loading chain.
 
 ## Fixed Real-Smoke Recipe
 
@@ -135,22 +141,26 @@ The execution order is Qwen2.5-7B, Llama-3.1-8B, then Qwen2.5-32B. This validate
 
 The monetary ceiling is `6 × the provider's displayed hourly price` and must be recorded and approved immediately before P2. No stale price from `PLAN.md` is treated as a current quote.
 
+Actual floating-point GPU hours, peak VRAM, disk/cache use, hourly price, and billed amount are written only to a private resource report below `PAGRPO_DATA_ROOT/private_reports/`. The public summary contains only allowlisted integer counts and lineage/status evidence; it does not coerce resource measurements into misleading count fields.
+
 ## Task 1: AutoDL Environment Preflight
 
 **Purpose:** Prove that the exact environment can load all three approved model snapshots and write only to approved external locations before candidate generation begins.
 
-**Consumes:** `main@34ef6f4`, the Phase 1 private split manifest, the three immutable model revisions, external `PAGRPO_DATA_ROOT`, external Hugging Face caches, and an environment-only `HF_TOKEN`.
+**Consumes:** frozen Phase 1 baseline `main@34ef6f4`, the separately approved P1 launcher commit, the Phase 1 private split manifest, the three immutable model revisions, external `PAGRPO_DATA_ROOT`, external Hugging Face caches, and an environment-only `HF_TOKEN`.
 
 **Produces:** One private preflight record containing package versions, GPU facts, effective cache paths as redacted path classes, model-access booleans, free-space counts, the approved monetary ceiling, and PASS/FAIL. It contains no source text, prompt, response, gold, token value, or private absolute path.
 
-- [ ] Verify `git rev-parse HEAD` equals `34ef6f4f0825d042d8ae8f1038afc7daa364a75f` and the checkout is clean.
+- [ ] Verify `git rev-parse HEAD` equals the separately approved P1 launcher commit, the checkout is clean, and `34ef6f4f0825d042d8ae8f1038afc7daa364a75f` is an ancestor of that commit.
+- [ ] Verify the protected Phase 1 paths are byte-identical to the frozen baseline: `git diff --exit-code 34ef6f4f0825d042d8ae8f1038afc7daa364a75f -- permstudy/data_pipeline scripts_permstudy/data tests_permstudy/data_pipeline`. Record both the Phase 1 baseline SHA and the approved launcher SHA in the private preflight record.
 - [ ] Verify the P1 activation patch has passed review and its CPU-only focused tests; otherwise stop before renting a GPU.
 - [ ] On the rented instance, record `nvidia-smi`, GPU model, VRAM, driver, CUDA visibility, host RAM, CPU count, and external free disk.
 - [ ] Use Python 3.12 with the previously validated Task 4 base (`torch==2.6.0`, `vllm==0.8.5`) and install the Phase 1 data dependencies so that `datasets==4.4.1` and `math-verify==0.9.0` win. Do not rely on the older `math-verify==0.8.0` line in `requirements-lock.txt`.
 - [ ] Execute import/version checks for `torch`, `vllm`, `transformers`, `datasets`, `pyarrow`, and `math_verify`; require CUDA availability and the exact pinned versions above.
 - [ ] Run the existing isolation check against `PAGRPO_DATA_ROOT`, `HF_HOME`, `HF_HUB_CACHE`/`HUGGINGFACE_HUB_CACHE`, `TRANSFORMERS_CACHE`, and the datasets caches. Any effective path inside the repo is a hard FAIL.
 - [ ] Confirm `HF_TOKEN` presence without printing it, and check access to all three exact model revisions without silently substituting branches, mirrors, quantized checkpoints, or different revisions.
-- [ ] Confirm the private split lineage equals the Phase 1 summary: MATH revision, ReClor file hashes, split manifest hash, 20+20 smoke identities, and 240 planned candidate identities.
+- [ ] Place the Phase 1 private split on AutoDL by exactly one approved route: securely transfer the already accepted external data-root subset, or deterministically rebuild it from the pinned MATH revision and ReClor four-file snapshot. Never transfer it through Git.
+- [ ] After transfer or rebuild, validate every referenced private artifact against its original manifest SHA256, then require identical canonical split bytes, `split_manifest_hash`, 20+20 smoke composite identities, and 240 planned candidate identities. Any mismatch stops execution; it must not be repaired by resplitting or selecting replacements.
 - [ ] Perform a load-only preflight in the fixed execution order, destroying each engine before loading the next. No candidate response is persisted during load-only preflight.
 
 **PASS:** Every check succeeds, the 32B model loads under its approved config, and the projected run remains inside the six-hour cap.
@@ -166,9 +176,9 @@ The monetary ceiling is `6 × the provider's displayed hourly price` and must be
 **Produces:** One generation run containing 240 successful composite candidate keys, append-only per-shard candidate/failure histories, verified manifests, and the canonical semantic candidate-set hash.
 
 - [ ] Recompute the plan from the immutable split and assert exactly 40 unique question IDs, 80 planned candidates per generator, and 240 unique `(generation_run_id, candidate_id)` keys.
-- [ ] Start Qwen2.5-7B in a fresh process and execute its ten eight-candidate shards. Release the engine and CUDA memory after the final shard.
-- [ ] Start Llama-3.1-8B in a fresh process and execute its ten shards. Release the engine and CUDA memory.
-- [ ] Start Qwen2.5-32B in a fresh process and execute its ten shards. Release the engine and CUDA memory.
+- [ ] Start Qwen2.5-7B once in a fresh process, retain that engine across every batch, and execute its ten eight-candidate shards. Release the engine and CUDA memory only after the final shard.
+- [ ] Start Llama-3.1-8B once in a fresh process, retain that engine across every batch, and execute its ten shards. Release the engine and CUDA memory only after the final shard.
+- [ ] Start Qwen2.5-32B once in a fresh process, retain that engine across every batch, and execute its ten shards. Release the engine and CUDA memory only after the final shard.
 - [ ] After every shard, validate the manifest-confirmed JSONL prefix, record count, artifact hash, config hash, split lineage, model revision, and completed composite keys.
 - [ ] On a transient process/network failure, restart with the identical config and resume only `planned_keys - successful_keys`. Historical failure records remain append-only.
 - [ ] When all shards finish, require exactly 240 successful composite keys and compute the canonical semantic candidate-set hash.
@@ -189,8 +199,9 @@ The monetary ceiling is `6 × the provider's displayed hourly price` and must be
 
 **Produces:** Candidate/question verification records, a deterministic audit selection, complete human decisions, and an audit summary bound to the same verification snapshot.
 
-- [ ] Run the existing ReClor strict terminal parser and official-label exact match; never infer gold from prompt or response text.
-- [ ] Run the existing MATH verifier with `math-verify==0.9.0`, parent-enforced `gold_timeout_seconds=30`, and `candidate_timeout_seconds=15`.
+- [ ] Use the Phase 2 entry point to load the real generation artifacts directly, validate their existing schemas and lineage, and pass the resulting records to package APIs. Do not invoke `verify_candidates.py` or any other fake-only downstream CLI loader for the real run.
+- [ ] Call the existing ReClor strict terminal parser and official-label exact match; never infer gold from prompt or response text.
+- [ ] Call the existing MATH verifier with `math-verify==0.9.0`, parent-enforced `gold_timeout_seconds=30`, and `candidate_timeout_seconds=15`.
 - [ ] Require each successful candidate to resolve to exactly one of `correct`, `incorrect`, `invalid`, `ambiguous`, or `error`; keep `gold_verification_error` question-level.
 - [ ] Build the existing `audit_seed=42`, `max_per_cell=5` selection from the exact verification snapshot.
 - [ ] Human reviewer 1 inspects every `invalid`, `ambiguous`, `error`, and `gold_verification_error`, plus the selected `correct/incorrect` samples stratified by `source × generator × status`.
@@ -210,13 +221,13 @@ The monetary ceiling is `6 × the provider's displayed hourly price` and must be
 
 **Produces:** An exact Functional Gate result, an exact Statistical Gate result, diagnostic tables, a trainer-ready Parquet when pairs exist, and one allowlisted sanitized Phase 2 summary.
 
-- [ ] Load `Qwen/Qwen2.5-7B-Instruct` tokenizer revision `a09a35458c702b33eeacc393d103063234e8bc28` and use the existing deterministic response deduplication and minimum-token-gap pair selector.
+- [ ] Through the same Phase 2 entry point, load `Qwen/Qwen2.5-7B-Instruct` tokenizer revision `a09a35458c702b33eeacc393d103063234e8bc28` and call the existing deterministic response deduplication and minimum-token-gap pair selector.
 - [ ] Create at most one pair per question, then exactly AB and BA permutations for every selected pair.
 - [ ] Run the existing Functional Gate and require 100% final generation completion, complete verification/audit coverage, valid manifests, and valid pair/permutation integrity.
 - [ ] Run the existing Statistical Gate with the frozen denominators and thresholds.
 - [ ] Export trainer Parquet only as an independent consumer of canonical pair/permutation records and perform the existing `RLHFDataset → DataProto → explicit identity` round trip.
 - [ ] Produce diagnostics for source/generator status counts, pair yield, pooled/per-source generator dominance, correct rates, ambiguous rate, Cramér's V, same/cross-generator pairs, response lengths, and positive-negative token gaps.
-- [ ] Write one allowlisted public file at `artifacts/data_pipeline/phase2/summary.json`. It may use only the existing `PUBLIC_EVIDENCE_KEYS`: encode the overall gate outcome in `phase_status`, put counts/timing/resource totals under the existing nested count fields, and use the existing run/revision/hash fields for lineage. Do not add a new top-level evidence key. It must set `real_generation_performed=true` and contain no real text, gold, prompt, response, secret, or private path.
+- [ ] Write one allowlisted public file at `artifacts/data_pipeline/phase2/summary.json`. It may use only the existing `PUBLIC_EVIDENCE_KEYS`: encode the overall gate outcome in `phase_status`, keep `completion_counts` and other count fields strictly nonnegative integers, and use the existing run/revision/hash fields for lineage. `git_sha` records the approved P1 launcher commit, while `run_ids.phase1_baseline_git_sha` records `34ef6f4f0825d042d8ae8f1038afc7daa364a75f`. Do not add a new top-level evidence key. It must set `real_generation_performed=true` and contain no real text, gold, prompt, response, secret, private path, floating-point GPU hours, peak-VRAM values, or monetary amounts.
 
 The frozen hard failures are:
 
@@ -269,9 +280,9 @@ The Phase 2 smoke review package is deliberately small:
 
 1. the allowlisted `artifacts/data_pipeline/phase2/summary.json`;
 2. the signed private audit decisions and private diagnostic tables under `PAGRPO_DATA_ROOT`;
-3. the exact Git SHA and immutable model/split/tokenizer revisions;
+3. the frozen Phase 1 baseline SHA, approved Phase 2 launcher SHA, and immutable model/split/tokenizer revisions;
 4. the Functional and Statistical Gate outputs;
-5. actual GPU-hours, peak VRAM, disk/cache use, and billed amount;
+5. the private resource report containing actual GPU-hours, peak VRAM, disk/cache use, hourly price, and billed amount;
 6. a short research-owner note describing observed error types and pair quality.
 
 No additional manifest layer, audit framework, gate implementation, dashboard, or repeated E2E suite is permitted unless a concrete failure proves the existing system insufficient and a separate design change is approved.
@@ -281,6 +292,7 @@ No additional manifest layer, audit framework, gate implementation, dashboard, o
 Phase 2 real smoke is complete only when:
 
 - P1 and P2 were separately approved before their actions began;
+- the approved launcher commit is a descendant of `main@34ef6f4`, and all protected Phase 1 paths are byte-identical to that baseline;
 - all three pinned models ran under one reviewed recipe;
 - all 240 planned candidate identities have successful records;
 - verification and human audit are complete and lineage-consistent;
