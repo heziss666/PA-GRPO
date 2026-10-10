@@ -1,0 +1,6 @@
+{"config":"algebra","level":"Level 2","problem":"Synthetic algebra problem one: solve 2x + 3 = 11 for x.","solution":"Subtract three from both sides, then halve: x = 4.","synthetic":true,"type":"synthetic-decoy-category"}
+{"config":"algebra","level":"Level 2","problem":"Synthetic algebra problem one: solve 2x + 3 = 11 for x.","solution":"Subtract three from both sides, then halve: x = 4.","synthetic":true,"type":"algebra"}
+{"config":"counting_and_probability","level":"Level 1","problem":"Synthetic probability problem one: a fair six-sided die is rolled once.","solution":"Six equally likely synthetic outcomes give a probability of 1/6.","synthetic":true,"type":"counting_and_probability"}
+{"config":"geometry","level":"Level 3","problem":"Synthetic geometry problem one: a square has side length 5.","solution":"The synthetic area is 25 square units.","synthetic":true,"type":"geometry"}
+{"config":"geometry","level":"Level 4","problem":"  Synthetic normalization problem: Cafe\u0301\r\nkeeps  double  spaces.  ","solution":"Normalization preserves the interior line break and the doubled spaces.","synthetic":true,"type":"geometry"}
+{"config":"prealgebra","level":"Level 1","problem":"Synthetic prealgebra problem one: compute 3/4 + 1/4.","solution":"The synthetic sum is exactly 1.","synthetic":true,"type":"prealgebra"}

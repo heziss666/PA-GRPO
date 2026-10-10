@@ -1,0 +1,28 @@
+[
+  {
+    "id_string": "synthetic-val-001",
+    "context": "Synthetic validation scenario one: this row must never become a training record.",
+    "question": "Which synthetic validation statement holds?",
+    "answers": [
+      "Validation choice A",
+      "Validation choice B",
+      "Validation choice C",
+      "Validation choice D"
+    ],
+    "label": 2,
+    "synthetic": true
+  },
+  {
+    "id_string": "synthetic-val-002",
+    "context": "Synthetic validation scenario two: this row must never become a training record.",
+    "question": "Which synthetic validation option remains?",
+    "answers": [
+      "Remaining choice A",
+      "Remaining choice B",
+      "Remaining choice C",
+      "Remaining choice D"
+    ],
+    "label": 0,
+    "synthetic": true
+  }
+]

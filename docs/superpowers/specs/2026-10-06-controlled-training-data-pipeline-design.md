@@ -1,0 +1,684 @@
+# Controlled Training Data Pipeline Design
+
+**Status:** `DESIGN_SPEC_APPROVED`; `IMPLEMENTATION_IN_PROGRESS`; Tasks 1-16 and Task 13A independently approved; Task 16B scope revision active
+
+**Branch:** `codex/data-pipeline-plan`
+
+**Scope:** Phase 1 system design and implementation only; Phase 2 remains prohibited
+
+**Phase 1 terminal status:** `DATA_PIPELINE_SYSTEM_READY`
+
+## 1. Purpose and non-goals
+
+This document defines a controlled, reproducible data-production system for constructing preference pairs from MATH and ReClor. The system separates data acquisition, generation, verification, auditing, pair selection, permutation construction, and statistical gating so that each stage has an immutable, hash-pinned input contract.
+
+Phase 1 proves that the production system is internally correct using synthetic fixtures, fake generation, and private source acquisition/splitting. It does **not** prove that the real three-model generation recipe works or that the resulting candidate distribution is healthy.
+
+Phase 1 must not:
+
+- start real vLLM generation;
+- download or run the three generator weights for inference;
+- produce the 240-candidate real smoke;
+- claim `FUNCTIONAL_GATE_PASS`, `STATISTICAL_GATE_PASS`, or `REAL_SMOKE_PASS`;
+- expand to a 200-pair pilot;
+- commit real source text, real model responses, real gold answers, private manifests, secrets, or machine-specific absolute paths.
+
+Phase 1 dependencies live in a dedicated exact-pin `requirements-data-pipeline-phase1.txt`. The paper-reproduction `requirements-lock.txt`, the base training requirements, and the existing Windows evaluator-smoke requirements remain unchanged.
+
+The approved detailed plan is maintained at `docs/superpowers/plans/2026-10-06-controlled-training-data-pipeline-phase1.md`. Implementation proceeds task-by-task against that plan and its reviewed amendments.
+
+Task 16B narrows only the remaining Task 17/18 evidence burden. It preserves every approved Task 1-16 schema, algorithm, identity, verifier, pair/permutation, audit/gate, export, and isolation contract. The research objective is a trustworthy data-preparation system for PA-GRPO experiments, not a generalized production data platform. New work after Task 16 must directly establish either end-to-end data usability or real-source credibility.
+
+## 2. Stage boundary
+
+### 2.1 Phase 1: system readiness
+
+Phase 1 covers:
+
+- this design and subsequent implementation plan;
+- schemas, canonicalization, identifiers, and validation;
+- MATH and ReClor source acquisition;
+- question identity, source-local deduplication, and deterministic internal split;
+- fake generation backend and backend-neutral adapter contract;
+- generation planning, sharding, append-only writes, retry, and resume;
+- ReClor and MATH verification;
+- deterministic correct-versus-incorrect pair selection;
+- AB/BA permutation construction;
+- deterministic trainer-ready Parquet export compatible with the current explicit-identity GRPO path;
+- verifier audit protocol;
+- Functional and Statistical Gate logic;
+- runtime data-isolation checks;
+- one complete synthetic fake end-to-end path plus cross-platform core-semantic hash checks;
+- private question and split manifests stored outside Git.
+
+The only successful Phase 1 status is:
+
+```text
+DATA_PIPELINE_SYSTEM_READY
+```
+
+### 2.2 Phase 2: real smoke
+
+Phase 2 starts only after an independent Phase 1 code review explicitly passes. It runs on Linux/AutoDL with an external data root, external Hugging Face caches, and an environment-provided `HF_TOKEN`:
+
+```text
+Qwen/Qwen2.5-7B-Instruct
+Qwen/Qwen2.5-32B-Instruct
+meta-llama/Llama-3.1-8B-Instruct
+        -> 240 real candidates
+        -> machine verification
+        -> human verifier audit
+        -> Functional Gate
+        -> Statistical Gate
+```
+
+Only a Phase 2 `PASS` permits the 200-pair pilot. `PASS_WITH_WARNINGS` requires explicit human approval; `FAIL` requires changing the recipe, verifier, or generator configuration and rerunning the smoke.
+
+### 2.3 Model roles
+
+The model roles are independent contracts:
+
+- `Qwen3-8B` was used only to validate the Task 4 real trainer/vLLM smoke path;
+- `Qwen/Qwen2.5-7B-Instruct`, `Qwen/Qwen2.5-32B-Instruct`, and `meta-llama/Llama-3.1-8B-Instruct` remain the approved candidate generators;
+- the immutable `Qwen/Qwen2.5-7B-Instruct` tokenizer revision remains the pair-length balancing tokenizer;
+- the controlled experiment backbone remains the separately approved backbone in `PLAN.md`.
+
+A successful smoke with one role never changes another role implicitly. Any such change requires an explicit design decision and a new run/config namespace.
+
+## 3. Data sources and legal boundary
+
+### 3.1 MATH
+
+- Dataset repository: `EleutherAI/hendrycks_math`.
+- Use all train configurations.
+- Resolve and record the immutable dataset revision/commit actually used.
+- Record the source snapshot metadata in a private manifest.
+- Before Task 18 writes a real source snapshot, resolve the requested ref to one exact immutable SHA and test both configuration discovery and one pinned-revision train load against that same SHA. If the exact revision is script-only and rejected by the pinned `datasets==4.4.1`, stop before writing and propose a source/dependency protocol change. Do not silently switch to `refs/convert/parquet`, `data_files=`, another revision, or another `datasets` version because each changes source lineage.
+
+### 3.2 ReClor
+
+- Use the official locally acquired ReClor training data.
+- ReClor is restricted to the current non-commercial research use.
+- Official ReClor validation and test data do not participate in the internal split.
+- Raw archives, extracted records, derived full-text manifests, and verified pools remain outside Git.
+- Phase 1 local acquisition accepts an already extracted runtime directory only. Archive extraction/password handling is deferred; the directory path exists only in environment configuration and private manifests.
+- The private source snapshot hashes `train.json`, `val.json`, `test.json`, and `use_items.txt` in a canonical relative-file tree manifest and records `tree_manifest_hash`. Validation/test files participate only in snapshot integrity and never produce training records.
+
+### 3.3 Runtime configuration
+
+Public documentation and committed configuration use placeholders only:
+
+```ini
+PAGRPO_DATA_ROOT=<external-data-root>
+PAGRPO_RECLOR_DIR=<external-reclor-directory>
+```
+
+Real local absolute paths are permitted as runtime inputs, but they must never be written to committed configuration, public artifacts, sanitized manifests, or public logs.
+
+## 4. Data isolation and safe logging
+
+Production data must live outside the Git repository. At startup, the system resolves the repository and data roots to real absolute paths and rejects any containment relationship. The check must handle `..`, symlinks, Windows junctions, and case-insensitive Windows path comparison.
+
+The same production check applies to the effective Hugging Face cache locations, including:
+
+```text
+HF_HOME
+TRANSFORMERS_CACHE
+HUGGINGFACE_HUB_CACHE
+```
+
+An effective cache inside the repository is a production error, not merely a warning.
+
+The `HF_TOKEN` is read only from the environment. Code may report `token_present=true/false` and access success/failure, but never the token value. Llama gated-access failure must fail fast before generation writes begin.
+
+Public logging uses an allowlist. It may contain identifiers, generator and shard identifiers, status, sanitized error type, retry counts, aggregate counts, and timing. It must not contain question text, candidate responses, gold answers, tokens, private absolute paths, or unfiltered third-party exception payloads. Optional full private diagnostics, if later enabled, must be written below the external private data root and remain disabled by default.
+
+Sanitized public manifests are allowlist-based and may contain only fields such as:
+
+- run and schema identifiers;
+- source and immutable source revision;
+- split manifest hash;
+- question, candidate, and pair counts;
+- generator repository and immutable revision;
+- status counts and aggregate statistics;
+- artifact hashes.
+
+Git-tracked content must not contain real MATH/ReClor question text, real candidate responses, real source gold answers, secrets, private manifests, or user-specific absolute paths. Explicitly marked **synthetic** fixtures may contain synthetic questions, responses, and gold values because they are required to test verifiers and pair construction.
+
+## 5. Question identity, deduplication, and split
+
+### 5.1 Question normalization v1
+
+Question text is canonicalized using:
+
+1. Unicode NFC;
+2. CRLF and CR converted to LF;
+3. leading and trailing whitespace stripped;
+4. internal text and line structure preserved.
+
+Normalization is versioned as `question_normalization_v1`.
+
+### 5.2 Identity
+
+For ReClor, construct this exact structured payload:
+
+```json
+{
+  "answers": ["A...", "B...", "C...", "D..."],
+  "context": "...",
+  "question": "...",
+  "schema": "reclor_question_content_v1"
+}
+```
+
+Each text value is normalized with `question_normalization_v1`; answer array order is preserved. The object is serialized as canonical JSON with UTF-8 encoding, lexicographically sorted keys, `,` and `:` separators without optional whitespace, `ensure_ascii=false`, and no trailing newline. `question_content_hash` is SHA256 over those exact bytes. Including the structured field names and array boundaries prevents ambiguous concatenation. The identity remains:
+
+```text
+original_question_id = reclor:train:{official id_string}
+```
+
+The official ID is stable provenance, while the structured full content hash proves that the content associated with that ID has not changed.
+
+For MATH:
+
+```text
+full_hash = SHA256(canonical problem text)
+original_question_id = math:train:{first 20 bytes of full_hash}
+```
+
+Twenty bytes means exactly 40 hexadecimal characters. The full 64-hex SHA256 is always retained as `question_content_hash`; the shortened prefix is only the readable ID component.
+
+### 5.3 Source-local deduplication
+
+Deduplication occurs independently within each source snapshot, never across MATH and ReClor.
+
+- MATH deduplicates by canonical problem hash and checks solution, category, and level for conflicts.
+- ReClor deduplicates by canonical context, question, and ordered answers and checks the official label and all identity fields for conflicts.
+- Equal content with consistent metadata keeps one deterministic provenance representative.
+- Equal content with conflicting metadata fails fast.
+
+### 5.4 Deterministic split
+
+All internal splits operate at `original_question_id` granularity. A candidate, pair, or permutation can never cross a split, and downstream stages are forbidden from resplitting.
+
+```text
+train/internal-holdout = 90/10
+split_seed = 42
+```
+
+- MATH first stratifies by category and level. If a stratum is too small, it falls back to category, then source-level stratification. Every fallback is recorded.
+- ReClor stratifies by the official gold label.
+- Official ReClor validation and test sets are excluded.
+
+The split manifest uses canonical UTF-8 JSONL with sorted keys and exactly one LF after every record. The first record is `record_type="split_metadata"`; it records the schema version, `split_algorithm="deterministic_stratified_question_split_v1"`, per-source question-normalization versions, source revisions/snapshot identities, seed, selected stratification levels, and fallback reasons. Every remaining record is `record_type="split_assignment"`, contains one `SplitAssignment`, and is sorted by `original_question_id`. The SHA256 of these exact persisted bytes is the `split_manifest_hash`; later CLI persistence must call the same package renderer rather than reconstructing the payload independently.
+
+The split stage typed configuration also binds `split_seed`, `split_algorithm`, and `split_schema_version` in addition to its role-tagged source-manifest bindings. Therefore any algorithm/schema version change moves both the split run namespace (`run_id`/`config_hash`) and the persisted output lineage.
+
+Every downstream run binds all three values:
+
+```text
+original_question_id
+question_content_hash
+split_manifest_hash
+```
+
+Resume is permitted only when the split manifest hash matches exactly. A changed source revision, file hash, or question content requires a new generation run.
+
+## 6. Smoke selection and generation plan
+
+The real Phase 2 smoke is selected from the internal training split:
+
+```text
+20 MATH questions
+20 ReClor questions
+3 generators x 2 samples per question
+= 240 planned candidates
+```
+
+Question selection is deterministic and stratified according to the source split metadata.
+
+Each model is run in a separate vLLM process, one model at a time. Generation is sharded, append-only, and resumable:
+
+```text
+question manifest
+  -> generator A shards -> completion
+  -> generator B shards -> completion
+  -> generator C shards -> completion
+  -> merge candidate pool
+  -> verify
+  -> build pairs
+```
+
+The backend-neutral interface is:
+
+```python
+generate(batch, generation_config) -> list[GenerationResult]
+```
+
+Phase 1 implements a fake backend and a vLLM adapter contract. The vLLM import must be genuinely lazy: importing `permstudy.data_pipeline.generation` on Windows or WSL without vLLM installed must succeed. vLLM is imported only when that backend is selected, at which point absence produces a clear configuration error. Phase 1 never starts a real model.
+
+### 6.1 Candidate identity
+
+`candidate_id` is deterministic and backend-neutral. It is derived from:
+
+```text
+original_question_id
+generator_id
+sampling_index
+```
+
+It is independent of backend return order. Decoding parameters are deliberately not part of `candidate_id`; they are pinned by the generation run manifest. Any generation configuration change creates a new `generation_run_id` and cannot be resumed into an old run.
+
+`candidate_id` is a reusable logical ID, not a globally unique record key. The unique key for every candidate record is:
+
+```text
+(generation_run_id, candidate_id)
+```
+
+Resume, shard merge, verification lookup, deduplication provenance, and artifact references must always use the composite key. No stage may use a bare `candidate_id` to match records across generation runs.
+
+### 6.2 Shards and resume
+
+Each generator shard has:
+
+```text
+candidates.jsonl
+failures.jsonl
+manifest.json
+```
+
+Successful candidate records are append-only. Failures are appended separately. Resume computes the planned composite `(generation_run_id, candidate_id)` keys minus the successful composite keys for that same run.
+
+Historical failures do not lower final generation completion after a later retry succeeds.
+
+Interrupted and uninterrupted execution are compared using the successful composite-key set and a canonical semantic candidate-set hash. That hash sorts successful records by composite key and covers their semantic candidate payload while excluding append order, timestamps, retry counts, failure history, record hashes, and physical paths. Physical execution-history manifest hashes may legitimately differ.
+
+The shard manifest pins at least the model repository and immutable revision, backend, prompt template revision/hash, full sampling configuration, question/split manifest hash, shard ID, and planned count.
+
+OOM is a recoverable failure record and never rolls back completed candidates. However, if resolving OOM changes batch size, tensor parallelism, maximum model length, memory utilization, or any other generation configuration, the old run is preserved and a new `generation_run_id` is mandatory. Resume of the old run is allowed only when the complete pinned configuration is unchanged.
+
+## 7. Storage integrity and locking
+
+Manifests are written to a temporary file in the same directory, flushed and fsynced, then atomically replaced. Large JSONL artifacts are not rewritten atomically; they are append-only, with one complete record per line and a `record_hash` per record.
+
+On recovery:
+
+- an incomplete final JSONL suffix is copied to a private quarantine file and fsynced, then the source is truncated and fsynced at its last complete LF before resume may append;
+- a malformed middle line is an integrity failure;
+- all referenced upstream artifacts must match the hashes pinned by their manifest.
+
+Each shard uses an exclusive lock containing:
+
+```text
+run_id
+shard_id
+host
+pid
+created_at
+```
+
+Stale locks are never removed automatically. Recovery requires an explicit `--recover-stale-lock` operation and verification that the recorded process no longer exists before a writer can continue.
+
+Configuration, isolation, and upstream integrity errors fail before output writes. Generation failures are recoverable records. Verifier outcomes such as `invalid`, `ambiguous`, and `error` are data states, not pipeline crashes, but they affect audits and gates.
+
+## 8. Verification contract
+
+All verification outputs use:
+
+```text
+correct
+incorrect
+invalid
+ambiguous
+error
+```
+
+A question-level `gold_verification_error` removes the complete question from pair construction. It is stored once in a separate question-verification record, never duplicated as candidate `error` records. Only `correct` and `incorrect` candidates can enter the pair pool.
+
+### 8.1 ReClor
+
+ReClor gold is never inferred from prompt text. The official dataset label is converted directly to canonical `A/B/C/D`.
+
+Candidate parsing accepts exactly one valid terminal:
+
+```text
+Final Answer: X
+```
+
+where `X` is a valid option. Multiple identical final markers are `invalid`; multiple conflicting markers are `ambiguous`.
+
+### 8.2 MATH
+
+MATH candidates must expose one terminal boxed answer in the prescribed final-answer region. Gold extraction, candidate extraction, and equivalence use a pinned `math-verify==0.9.0` contract.
+
+`incorrect` is assigned only if gold parsing succeeds, candidate parsing succeeds, and the verifier explicitly establishes non-equivalence. Multiple parsed expressions or uncertain symbolic comparison are `ambiguous`; timeout or library exception is `error`.
+
+Gold is parsed once per question and cached for all candidates during normal execution. A worker must complete an explicit `GOLD_READY`/`GOLD_ERROR` handshake under a parent-enforced gold timeout before it may receive candidate work. Gold error or timeout yields one `gold_verification_error` record and stops the question. Each candidate comparison then has an independent parent-enforced timeout; restarting a worker after candidate timeout may reparse gold.
+
+Candidate verification records contain run and candidate identifiers, verifier name/version, parser version, prediction parse status, canonical prediction where privately allowed, verification status, timeout, and sanitized error type. Separate question verification records contain verification run ID, question ID, source, gold parse status, canonical gold where privately allowed, and sanitized error type. ReClor uses `reclor_exact_match`; it must not be labeled as `math-verify`.
+
+## 9. Response canonicalization and deterministic pair selection
+
+Response normalization v1 applies:
+
+1. Unicode NFC;
+2. CRLF and CR converted to LF;
+3. leading and trailing whitespace stripped;
+4. internal text and line structure preserved.
+
+The normalized response hash is SHA256 over canonical UTF-8 bytes. Raw candidate records are retained. Duplicate normalized responses form a run-scoped deduplication group whose representative is the lexicographically smallest `candidate_id`. The group preserves the normalized response hash, representative composite candidate key, all member composite candidate keys, and member generators. If members with one normalized response hash have conflicting verification statuses, pair construction fails with a verifier/integrity error rather than silently selecting a representative.
+
+Responses with `finish_reason=length`, empty content, or no verifiable terminal answer are excluded from the pair pool even if an incidental answer can be extracted.
+
+All response lengths are measured using the tokenizer for `Qwen/Qwen2.5-7B-Instruct` at a recorded immutable revision:
+
+```python
+len(tokenizer.encode(canonical_response, add_special_tokens=False))
+```
+
+For each eligible question, enumerate every representative `correct x incorrect` combination and select the pair with minimum absolute token-length gap. There is no same-generator or cross-generator preference. Exact ties are resolved lexicographically by candidate IDs.
+
+The pair identifier is run-scoped:
+
+```text
+pair_id = H(
+  generation_run_id,
+  original_question_id,
+  response_pos_id,
+  response_neg_id,
+  pair_schema_version
+)
+```
+
+Selected response hashes are also stored. Thus rebuilding within one generation run is stable, while a new generation run necessarily enters a new pair namespace.
+
+The pair manifest hash is computed from canonical UTF-8 JSONL with sorted keys, LF line endings, records sorted by `original_question_id`, and no timestamps or other volatile fields in the hashed payload.
+
+## 10. AB/BA permutations
+
+Each selected semantic pair produces exactly two surface forms:
+
+```text
+AB: A=positive, B=negative
+BA: A=negative, B=positive
+```
+
+Permutation records inherit the question ID, split, split manifest hash, pair ID, generation run ID, and pinned upstream hashes. They do not independently resplit or recover source files.
+
+### 10.1 Trainer-ready Parquet export
+
+Trainer export is a deterministic consumption layer over immutable questions, successful candidates, selected pairs, and AB/BA permutations. It does not modify canonical private records and is not an upstream dependency of audit or gate computation:
+
+```text
+verification -> pair/permutation
+                 |-> audit/gates
+                 `-> trainer Parquet export
+```
+
+Every exported row contains the current verl-compatible fields:
+
+```text
+data_source
+prompt
+ability
+reward_model.ground_truth
+extra_info.pair_id
+extra_info.original_question_id
+extra_info.permutation_id
+```
+
+`extra_info.pair_id` is exactly `PairRecord.pair_id`; the exporter must not replace it with `original_question_id` or rely on the trainer's compatibility fallback. AB writes the positive response as A, the negative response as B, and ground truth A. BA reverses the surfaces and writes ground truth B. Rows are sorted by `(original_question_id, permutation_id)`.
+
+Prompt template `pairwise_judge_direct_v1` is immutable and hash-pinned. It renders the canonical source question, Response A, and Response B into a two-message chat prompt with system text `Reply with only A or B.` and a user message that ends `Which response is more correct?\nAnswer with A or B only.` MATH renders its problem. ReClor renders context, question, and the ordered A/B/C/D source options. A template change creates a new export run.
+
+The export manifest role-binds the exact split (which pins the question artifacts), generation, pair, and permutation manifest hashes, plus the prompt-template hash. It records the Parquet artifact SHA256, row count, schema version, and export run ID. Candidate response hashes and question content hashes are revalidated before export; free files that are not pinned by these upstream manifests cannot be read.
+
+Acceptance requires an actual Parquet round trip through `verl.utils.dataset.rl_dataset.RLHFDataset` and its production `collate_fn`, then `DataProto`, `attach_permutation_identity`, `repeat_for_rollout`, and `merge_identity_into_extra_infos`. The test must prove nested `prompt`, `reward_model`, and `extra_info` survive pandas/PyArrow serialization and the explicit identity path; an object-only unit test is insufficient.
+
+## 11. Human verifier audit
+
+The smoke audit uses the exact verified manifest that feeds pair construction. It runs before pair construction or is cryptographically bound to the same verification output.
+
+Audit coverage:
+
+1. inspect every `ambiguous`, `error`, and `gold_verification_error`;
+2. inspect every `invalid`;
+3. sample `correct` and `incorrect` by `source x generator x status`, using `audit_seed=42`, up to five per cell and all records when a cell has fewer than five.
+
+Human verdicts are:
+
+```text
+AGREE
+DISAGREE
+UNSURE
+```
+
+An apparent false `correct` or false `incorrect` receives a second review of the source item, gold, candidate, parser output, and verifier result. A confirmed `DISAGREE` causes the Statistical Gate to fail. `UNSURE` enters a separate review queue and is not counted as a confirmed verifier error.
+
+Audit accepts both candidate verification records and question-level gold verification records. A gold error is audited exactly once by question identity and does not acquire a synthetic candidate or generator identity. Audit records include `generation_run_id`, `verification_run_id`, record kind, question ID, optional candidate ID, source, optional generator/machine status, audit seed, verdict, and reason code. Reason codes include:
+
+```text
+missing_final_marker
+duplicate_same_marker
+conflicting_markers
+math_parse_failure
+gold_parse_failure
+timeout
+dependency_error
+prompt_contract_mismatch
+other
+```
+
+Systematic prompt, parser, or verifier problems block expansion even if the affected records would otherwise be excluded from pairs. Fixing a verifier reruns verification, audit, pair, and permutation stages against the immutable candidate pool; it does not regenerate candidates.
+
+## 12. Gates
+
+### 12.1 Functional Gate
+
+The Functional Gate checks that planned candidates are accounted for after retry/resume, manifests and hashes are valid, verification completed, audit artifacts bind to the correct run, and pair/permutation records satisfy all contracts. Generation completion of 100% means that every planned candidate eventually has a successful record after allowed retry/resume; a first-attempt failure alone does not fail the gate.
+
+### 12.2 Statistical Gate
+
+The Statistical Gate emits exactly one of:
+
+```text
+PASS
+PASS_WITH_WARNINGS
+FAIL
+```
+
+All Gate metrics use the following fixed denominators.
+
+For each source:
+
+```text
+pair_yield(source)
+= number of planned source questions that produce one final selected pair
+  / number of planned smoke questions for that source
+```
+
+The real smoke denominator is 20 for MATH and 20 for ReClor. Each question contributes at most one selected pair to the numerator.
+
+For each generator/source cell:
+
+```text
+invalid_error_rate(generator, source)
+= (# verification_status=invalid + # verification_status=error)
+  / # successfully generated candidates in that generator/source cell
+```
+
+At 100% real-smoke generation completion, the cell denominator is `20 questions x 2 samples = 40`. Both numerator and denominator are candidate-level only; question-level `gold_verification_error` records never enter generator/source rates. Historical failed attempts and missing candidates are not included in this denominator; unresolved missing candidates independently fail the 100% completion requirement.
+
+Generator dominance uses only representatives in final selected pairs:
+
+```text
+positive_share(generator, scope)
+= # selected pairs whose positive representative comes from generator in scope
+  / # selected pairs in scope
+
+negative_share(generator, scope)
+= # selected pairs whose negative representative comes from generator in scope
+  / # selected pairs in scope
+```
+
+`scope=pooled` uses all selected MATH and ReClor pairs; `scope=source` uses only selected pairs from that source. A zero selected-pair denominator leaves dominance undefined, while the corresponding pair-yield rule already produces a hard failure.
+
+Correct rate excludes non-binary verifier states:
+
+```text
+correct_rate(generator, source)
+= # correct
+  / (# correct + # incorrect)
+```
+
+If `correct + incorrect = 0`, correct rate is undefined and reported diagnostically; it is not treated as either 0% or 100%.
+
+Hard failure conditions:
+
+- final generation completion after retry/resume is below 100%;
+- either source has valid-pair yield below 20%;
+- any generator/source cell has `invalid + error` above 20%;
+- in pooled valid pairs, a single generator supplies at least 90% of all positive or all negative responses;
+- a confirmed human-audit `DISAGREE` exists for a `correct` or `incorrect` label;
+- audit reveals a systematic prompt/parser/verifier defect.
+
+Warnings:
+
+- either source has pair yield below 30%;
+- pooled or per-source generator share of positives or negatives exceeds 70%;
+- any generator/source correct rate is 0% or 100%;
+- per-source generator dominance reaches 90% or more, recorded as a strong warning;
+
+`ambiguous` is always reported separately and never merged into `incorrect`.
+
+Diagnostic-only outputs include ambiguous rate, Cramer's V, generator-by-label contingency tables, same-generator versus cross-generator pair proportions, source-wise and generator-wise correct rates, response length distributions, and positive-negative token-length gaps. Phase 2 v1 does not derive a warning from ambiguous rate because no deterministic threshold has been approved. The 40-question smoke is too small for significance claims from Cramer's V.
+
+Gate actions:
+
+```text
+FAIL               -> fix recipe/verifier/config and rerun smoke
+PASS_WITH_WARNINGS -> mandatory human review before any pilot
+PASS               -> may proceed to the 200-pair pilot
+```
+
+## 13. Layering and run lineage
+
+The approved package structure is:
+
+```text
+permstudy/data_pipeline/
+  schema.py
+  canonical.py
+  ids.py
+  isolation.py
+  io.py
+  sources/math.py
+  sources/reclor.py
+  splitting.py
+  generation/base.py
+  generation/fake.py
+  generation/vllm.py
+  generation/runner.py
+  verification/reclor.py
+  verification/math.py
+  pairs.py
+  permutations.py
+  trainer_export.py
+  audit.py
+  gates.py
+```
+
+Command-line entry points are planned as:
+
+```text
+scripts_permstudy/data/prepare_questions.py
+scripts_permstudy/data/plan_generation.py
+scripts_permstudy/data/generate_candidates.py
+scripts_permstudy/data/verify_candidates.py
+scripts_permstudy/data/build_reasoning_pairs.py
+scripts_permstudy/data/build_permutations.py
+scripts_permstudy/data/export_training_dataset.py
+scripts_permstudy/data/audit_generator_distribution.py
+scripts_permstudy/data/validate_dataset.py
+scripts_permstudy/data/run_fake_e2e.py
+```
+
+`prepare_questions.py` has three explicit subcommands. `acquire-reclor` and `acquire-math` each create one immutable source manifest; `build-split` requires both manifests and produces the single unified two-source split/smoke manifest. Phase 1 exposes `--reclor-dir` only, not an archive argument.
+
+Schemas use frozen dataclasses and explicit validators; Phase 1 does not add a schema framework.
+
+Each layer records `run_id`, `schema_version`, direct upstream manifest hash, its own configuration hash, and output manifest hash. The already reviewed Task 1-6 IDs and golden hashes remain unchanged. Beginning with Task 7, every typed stage config contains role-tagged upstream bindings:
+
+```json
+{
+  "upstream_bindings": {
+    "math_questions": "<manifest-hash>",
+    "reclor_questions": "<manifest-hash>"
+  }
+}
+```
+
+The mapping is canonicalized by sorted role key as part of the existing `run_id(stage, config)` input. A bare sorted list is insufficient because it does not prove which upstream hash played which role. `RunManifest.upstream_manifest_hashes` remains the existing sorted list of binding values for compatibility, while the typed config/config hash carries the role association. Missing or unknown roles, non-64-hex values, or a manifest list that differs from the binding values fail before any output write.
+
+A layer may read only:
+
+1. its direct immutable upstream manifest; and
+2. upstream artifacts explicitly referenced and hash-pinned by that manifest.
+
+No layer may read untracked or freely discovered data files. Tests must prove that identical parameters and bindings yield the same run ID, while changing one upstream hash or moving the same hash to a different role changes the run ID. A changed verifier configuration creates a new verification run and therefore new downstream audit, pair, permutation, and export namespaces without changing the generation run.
+
+## 14. Test matrix
+
+Phase 1 tests must cover:
+
+- canonical normalization and stable cross-platform hashes;
+- ReClor and MATH identity construction, collision checks, and source-local deduplication;
+- metadata conflict failures;
+- deterministic stratified splitting and both MATH fallback levels;
+- split inheritance and prevention of cross-split candidates, pairs, and permutations;
+- resolved-path repository containment, symlink/junction, case, cache, and redaction checks;
+- generation planning, backend-neutral candidate IDs, fake backend behavior, and lazy vLLM import;
+- append-only resume, historical failure then success, durable incomplete-tail quarantine/truncation, malformed-middle failure, record hashes, and stale-lock recovery rules;
+- ReClor terminal marker parsing and official-label handling;
+- MATH gold handshake/caching, question-level gold records, strict terminal extraction, equivalence, ambiguity, separate gold/candidate timeout, and errors with `math-verify==0.9.0`;
+- response normalization, deduplication, fixed-tokenizer length measurement, tie-breaking, run-scoped pair IDs, and canonical pair hashes;
+- exact AB/BA permutation semantics and lineage;
+- role-tagged upstream bindings, including role swaps changing downstream run IDs without changing Task 1-6 golden hashes;
+- trainer-ready Parquet export, artifact/manifest hashes, and a real `RLHFDataset` -> explicit identity -> rollout repeat -> reward-extra-info round trip;
+- deterministic audit sampling, verdicts, and reason codes;
+- all Gate thresholds and status transitions;
+- equivalent split, candidate-set, pair, permutation, and canonical trainer-row semantic hashes on Windows and Linux/WSL; raw Parquet bytes, physical execution-history manifests, dependency metadata, timings, and duplicate full-suite logs are diagnostic-only.
+
+Two complementary acceptance paths are required:
+
+1. one committed, explicitly marked 80-question synthetic source fixture (40 MATH and 40 ReClor, with ten ReClor labels per option) that runs 90/10 split, deterministic 20+20 train smoke selection, 240-candidate fake generation, verification, audit, pairing, and permutation, then evaluates gates from canonical records while independently completing the trainer-export round trip, including one representative interruption/resume comparison;
+2. one private real-source readiness path that acquires immutable MATH/ReClor snapshots, verifies source-local deduplication and the deterministic split, performs a deterministic human source/gold/format audit, checks isolation, and proves the real 20+20 smoke manifest plans exactly 240 candidates. It stops before candidate generation because real inference belongs to Phase 2 and Task 17 already proves pipeline execution.
+
+The Task 17 E2E is the only full pipeline integration test required. Existing focused tests remain authoritative for individual contracts; Task 17/18 must not add duplicate E2E variants, new protocol layers, or a new evidence framework.
+
+## 15. Phase 1 acceptance criteria
+
+Phase 1 may report `DATA_PIPELINE_SYSTEM_READY` only when all of the following are true:
+
+- the design and detailed implementation plan have been independently reviewed before implementation;
+- source acquisition records immutable MATH revision and ReClor four-file tree-manifest hashes privately;
+- the production data root and effective model caches are external and pass resolved-path isolation checks;
+- question identities, source-local deduplication, deterministic 90/10 split, and split manifest are reproducible;
+- the fake 40-question/240-candidate plan completes end to end;
+- interruption and resume yield the same successful composite candidate set and canonical semantic candidate-set hash as an uninterrupted run; physical failure-history manifests need not match;
+- importing the generation package succeeds without vLLM installed;
+- MATH verification pins `math-verify==0.9.0`;
+- pair and permutation outputs are deterministic and hash-stable;
+- the trainer Parquet export is bound to split/generation/pair/permutation manifests and passes the current verl explicit-identity round trip without a legacy index fallback;
+- one allowlisted sanitized Phase 1 summary records real-source revisions/hashes, counts, split/fallback, human-audit totals, isolation result, planning count, and Task 17 semantic hashes;
+- Git scanning finds no real source questions, real responses, real source gold, tokens/secrets, private manifests, or user-specific absolute paths;
+- explicitly marked synthetic fixture questions, responses, and gold are the only full-text fixture exception;
+- the Task 17 core semantic hashes match across configured Windows/WSL runs; raw Parquet bytes and physical execution histories are non-blocking diagnostics;
+- the private real-source audit finds no confirmed wrong gold, corrupted fields, cross-split identity, or systematic acquisition/parser issue, and the real smoke manifest produces exactly 240 planned candidate identities without running generation;
+- an independent Phase 1 code review passes.
+
+Passing these criteria proves that the data-production system is ready for real smoke execution. It does not prove real generator quality or authorize the 200-pair pilot.
+
+## 16. Review checkpoint
+
+The design and detailed implementation plan are approved. Tasks 1-16 plus Task 13A are implemented and independently reviewed. Task 16B supersedes only the former Task 17/18 acceptance breadth: one complete synthetic E2E and one private real-source readiness check now close Phase 1. No Phase 1 completion claim is permitted until the revised Tasks 17 and 18 pass their documented reviews, and no real generation begins before a separate Phase 2 plan is approved.

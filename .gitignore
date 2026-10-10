@@ -147,3 +147,9 @@ logs
 log
 outputs
 .history
+
+# Controlled data pipeline production artifacts must remain external
+data_permstudy/
+private_data/
+private_logs/
+*.private-manifest.json

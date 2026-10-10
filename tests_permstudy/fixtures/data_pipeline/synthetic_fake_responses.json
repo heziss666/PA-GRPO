@@ -1,0 +1,20 @@
+{
+  "synthetic": true,
+  "math": [
+    "Synthetic correct reasoning. Final Answer: \\boxed{{{gold}}}",
+    "Synthetic wrong reasoning. Final Answer: \\boxed{{{wrong}}}",
+    "Synthetic correct reasoning. Final Answer: \\boxed{{{gold}}}",
+    "Synthetic response without a final marker.",
+    "Synthetic conflicting answers. Final Answer: \\boxed{{{gold}}} Final Answer: \\boxed{{{wrong}}}",
+    "Synthetic dependency failure. Final Answer: \\boxed{{synthetic_error}}"
+  ],
+  "reclor": [
+    "Synthetic correct reasoning. Final Answer: {gold}",
+    "Synthetic wrong reasoning. Final Answer: {wrong}",
+    "Synthetic correct reasoning. Final Answer: {gold}",
+    "Synthetic response without a final marker.",
+    "Synthetic conflicting answers. Final Answer: {gold} Final Answer: {wrong}",
+    "Synthetic wrong reasoning. Final Answer: {wrong}"
+  ],
+  "historical_failure": "dependency_error"
+}
