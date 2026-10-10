@@ -1,0 +1,92 @@
+{
+  "artifact_hashes": {
+    "generation_plan_envelope": "68945ffcafd8850584f84acd1b990fd9d3a550e3404b2c36713c52c316ab94c8",
+    "math_records": "54ca4f01c51bda1e3a37e92dbfb865c68f347450e8ab3f16ace844252cc54f9f",
+    "real_audit_decisions": "67bdc6d86b31b921ec20c39db2010d75781e4736c70166375d1f406c07a41509",
+    "real_audit_selection": "6314634b6b04a2a2feea734083868376c2220b2124a4bbd7af5553ab03635eaa",
+    "reclor_records": "0f7c153a8af519a8dfd740453c465a76d58a0efefe3c321d0d3d30e93bf16372",
+    "split_envelope": "5dd6d696403d23576b695e3da97eaa7c0d66c9d759662ea212bc70b8acd7ded8",
+    "task17_pairs": "1c5e911f9c39a7bdffac9b7a12d97b72b71b3c286eac604366f3401421d9cefc",
+    "task17_permutations": "7d23d57dfc4490c0722e08a2e7ce8b152097df7309eb04ea6997e560c2151023",
+    "task17_split": "22c0f6d7eae6111a8da980323dcc8b1054902fb8ca9501c97f5b11f971e4c6ba",
+    "task17_trainer_rows": "7c2848126adcde0dce30cd98b938490a31d30b338e23d355bb05bb3f810cfe18"
+  },
+  "completion_counts": {
+    "audit_math_agree": 10,
+    "audit_math_disagree": 0,
+    "audit_math_unsure": 0,
+    "audit_reclor_agree": 10,
+    "audit_reclor_disagree": 0,
+    "audit_reclor_unsure": 0,
+    "audit_systematic_issues": 0,
+    "effective_cache_kinds_checked": 11,
+    "generator_count": 3,
+    "planned_candidates": 240,
+    "real_generation_calls": 0,
+    "samples_per_item": 2,
+    "task17_pairs": 40,
+    "task17_permutations": 80,
+    "task17_trainer_rows": 80,
+    "tracked_files_scanned": 1207,
+    "tracked_private_probe_violations": 0
+  },
+  "duplicate_counts": {
+    "math_dropped": 0,
+    "reclor_dropped": 0
+  },
+  "fallback_reasons": {
+    "math": [],
+    "reclor": []
+  },
+  "git_sha": "da35ae203cbf766c54f7a78e422b8ba1407a27a2",
+  "package_versions": {
+    "datasets": "4.4.1",
+    "huggingface_hub": "0.36.0",
+    "pandas": "2.3.3",
+    "pyarrow": "22.0.0",
+    "tokenizers": "0.22.1",
+    "torch": "2.6.0+cpu",
+    "transformers": "4.57.1"
+  },
+  "phase_status": "AWAITING_PHASE1_CODE_REVIEW",
+  "platform": "windows",
+  "python_version": "3.12.15",
+  "question_counts": {
+    "math_internal_holdout": 750,
+    "math_smoke": 20,
+    "math_total": 7500,
+    "math_train": 6750,
+    "reclor_internal_holdout": 464,
+    "reclor_smoke": 20,
+    "reclor_total": 4638,
+    "reclor_train": 4174,
+    "total": 12138
+  },
+  "real_generation_performed": false,
+  "run_ids": [
+    "f8be77c5304affc375c369964a2f14af7adad7ca0fced9967e650e47d5d9c87b",
+    "0e0fd2b293e4130669d6f2de0ce8cb4942c7fba75ba63ab5ceff89c6b6f82531",
+    "7fa4a9a76ffb110f2004cdfe8998760bed48886c9571dc7a45c7d104a33cf942",
+    "7eb75b21de6c0bc3c67ce58d862f1258bb812fb4ef3052ef34a077bda592aa5e"
+  ],
+  "schema_version": "phase1_real_source_readiness_v1",
+  "semantic_candidate_set_hash": "abee13cbe9b55e206363a654bdfc5e9485e40a2ea3c297a4d7fb5c48a399413e",
+  "source_file_hashes": {
+    "test.json": "94f568119bc30696459db950da4489c7f6b41a1865bca0b5f44368cf4588ed36",
+    "train.json": "e9b92a11e5d89e0966aadee7b35773d48e5d6ec86c03ba5f6011acd475d04157",
+    "use_items.txt": "bd80d35fc4bd7db8b19ecfb25880fea3fc586b26fee0d979f8f5854b4451c865",
+    "val.json": "49a43973d7cf00d5e0d645daad864efca8e10497ced241f32afa4bd260233159"
+  },
+  "source_revisions": {
+    "EleutherAI/hendrycks_math": "21a5633873b6a120296cce3e2df9d5550074f4a3",
+    "Qwen/Qwen2.5-32B-Instruct": "5ede1c97bbab6ce5cda5812749b4c0bdf79b18dd",
+    "Qwen/Qwen2.5-7B-Instruct": "a09a35458c702b33eeacc393d103063234e8bc28",
+    "meta-llama/Llama-3.1-8B-Instruct": "0e9e39f249a16976918f6564b8830bc894c89659"
+  },
+  "split_manifest_hash": "94f6dabb281daf22723c3797244c17a9c8fd520a1688c0f509e5d2c5fd1a3bde",
+  "stratification_level": {
+    "math": "category+level",
+    "reclor": "gold_label"
+  },
+  "tree_manifest_hash": "1330ded2698e23c05ade24a4a858e531b5234363814e089a6ccb2bc82379967c"
+}
