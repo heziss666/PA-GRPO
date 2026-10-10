@@ -96,14 +96,14 @@ def rooted(root, value, *, relative=True):
     if not isinstance(value, (str, Path)) or not str(value):
         raise CLIContractError()
     raw = str(value)
-    if relative and (
-        Path(raw).is_absolute() or PureWindowsPath(raw).drive or "\\" in raw
-    ):
+    supplied = Path(raw)
+    absolute = supplied.is_absolute() or bool(PureWindowsPath(raw).drive)
+    if relative and (absolute or "\\" in raw):
         raise CLIContractError()
     if ".." in Path(raw).parts:
         raise CLIContractError()
-    target = (root / raw).resolve()
-    if not target.is_relative_to(root) or target == root:
+    target = (supplied if absolute else root / supplied).resolve()
+    if target == root or (relative and not target.is_relative_to(root)):
         raise CLIContractError()
     return target
 

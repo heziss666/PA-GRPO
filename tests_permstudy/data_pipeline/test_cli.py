@@ -209,6 +209,43 @@ def test_reclor_requires_acknowledgement_before_source_access(tmp_path):
     assert not list(tmp_path.iterdir())
 
 
+def test_reclor_cli_accepts_an_absolute_external_source_directory(tmp_path):
+    source = tmp_path / "reclor-source"
+    data_root = tmp_path / "private-data"
+    source.mkdir()
+    (source / "train.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id_string": "synthetic_0",
+                    "context": "Synthetic context.",
+                    "question": "Which follows?",
+                    "answers": ["One", "Two", "Three", "Four"],
+                    "label": 0,
+                    "synthetic": True,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    for name in ("val.json", "test.json", "use_items.txt"):
+        (source / name).write_text("[]", encoding="utf-8")
+
+    result = cli("prepare_questions").main(
+        [
+            "acquire-reclor",
+            "--data-root",
+            str(data_root),
+            "--reclor-dir",
+            str(source.resolve()),
+            "--acknowledge-reclor-noncommercial",
+        ]
+    )
+
+    assert result == 0
+    assert len(list((data_root / "sources" / "reclor").glob("*/manifest.json"))) == 1
+
+
 def test_unexpected_error_is_sanitized_and_traceback_is_opt_in(
     tmp_path, monkeypatch, capsys
 ):
