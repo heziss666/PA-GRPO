@@ -1,6 +1,7 @@
 """Focused CPU-only tests for the Phase 2 real-smoke coordinator."""
 
 import importlib
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +19,7 @@ from permstudy.data_pipeline.schema import (
 MODEL_REVISION = "1" * 40
 SPLIT_HASH = "2" * 64
 SPLIT_ENVELOPE_HASH = "3" * 64
-TOKENIZER_REVISION = "4" * 40
+TOKENIZER_REVISION = "a09a35458c702b33eeacc393d103063234e8bc28"
 
 
 def reclor_question(index=1):
@@ -408,3 +409,231 @@ def test_tiny_real_candidate_shape_reaches_existing_verification_pair_and_permut
         (1, "B"),
     ]
     assert all(item.pair_id == selected[0].pair_id for item in permutations)
+
+
+def test_cli_generate_verify_finalize_writes_one_formal_resumable_chain(
+    monkeypatch, tmp_path
+):
+    """Removing the CLI dispatcher must break the only executable P2 path."""
+    from permstudy.data_pipeline import splitting
+    from permstudy.data_pipeline.audit import AuditVerdict
+    from permstudy.data_pipeline.canonical import sha256_hex
+    from permstudy.data_pipeline.ids import reclor_content_hash, run_id
+    from permstudy.data_pipeline.io import append_record, write_atomic_manifest
+    from permstudy.data_pipeline.schema import AuditDecision, AuditSelectionRecord
+    from scripts_permstudy.data import _common as io
+    from scripts_permstudy.phase2 import run_real_smoke as cli
+
+    answers = ("Alpha", "Beta", "Gamma", "Delta")
+    question = QuestionRecord(
+        schema_version="question_v1",
+        source=Source.RECLOR,
+        original_question_id="reclor:train:phase2_cli_fixture",
+        question_content_hash=reclor_content_hash(
+            "Fixture context", "Which option follows?", answers
+        ),
+        source_snapshot_id="phase2-cli-fixture",
+        source_revision="fixture-v1",
+        source_row_id="1",
+        context="Fixture context",
+        question="Which option follows?",
+        answers=answers,
+        gold_label="A",
+        problem=None,
+        solution=None,
+        category=None,
+        level=None,
+        synthetic=True,
+    )
+    smoke = (assignment(question),)
+
+    def envelope(path, payload):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_atomic_manifest(path, payload)
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    source_paths = {}
+    source_hashes = {}
+    for source in ("math", "reclor"):
+        source_file = tmp_path / f"sources/{source}/questions.jsonl"
+        source_file.parent.mkdir(parents=True, exist_ok=True)
+        source_file.write_bytes(b"")
+        payload = {
+            "schema_version": "run_manifest_v1",
+            "stage": "sources",
+            "run_id": sha256_hex(source.encode()),
+            "config_hash": "0" * 64,
+            "upstream_manifest_hashes": [],
+            "artifacts": [io.artifact(tmp_path, source_file, 0).to_dict()],
+            "counts": {"questions": 0},
+            "source": source,
+        }
+        path = tmp_path / f"sources/{source}/manifest.json"
+        manifest = envelope(path, payload)
+        source_paths[f"{source}_questions"] = path.relative_to(tmp_path).as_posix()
+        source_hashes[f"{source}_questions"] = manifest["output_manifest_hash"]
+
+    questions_ref = io.persist_records(
+        tmp_path, "split/fixture/questions.jsonl", [question]
+    )
+    split_config = splitting.split_stage_config(42, source_hashes)
+    split_payload = {
+        "schema_version": "run_manifest_v1",
+        "stage": "split",
+        "run_id": run_id("split", split_config),
+        "config_hash": sha256_hex(io.canonical_json_bytes(split_config)),
+        "typed_config": split_config,
+        "upstream_bindings": source_hashes,
+        "upstream_manifest_hashes": sorted(source_hashes.values()),
+        "upstream_manifests": {
+            role: io.artifact(tmp_path, tmp_path / relative).to_dict()
+            for role, relative in source_paths.items()
+        },
+        "artifacts": [questions_ref.to_dict()],
+        "counts": {"questions": 1, "smoke": 1},
+        "split_manifest_hash": SPLIT_HASH,
+    }
+    split_path = tmp_path / "split/fixture/manifest.json"
+    envelope(split_path, split_payload)
+
+    def tiny_split_loader(root, manifest):
+        assert root == tmp_path
+        assert manifest["split_manifest_hash"] == SPLIT_HASH
+        return (question,), smoke
+
+    class AnswerEngine:
+        def generate(self, requests, config):
+            return [
+                SimpleNamespace(
+                    request_id=request.request_id,
+                    outputs=[
+                        SimpleNamespace(
+                            text=(
+                                "Reasoning.\nFinal Answer: A"
+                                if request.plan.sampling_index == 0
+                                else "Reasoning.\nFinal Answer: B"
+                            ),
+                            finish_reason="stop",
+                            token_ids=[1, 2, 3],
+                        )
+                    ],
+                )
+                for request in reversed(requests)
+            ]
+
+    install_fake_vllm(monkeypatch, SimpleNamespace())
+
+    def factory_builder(questions):
+        return lambda module, config: AnswerEngine()
+
+    common = [
+        "--data-root",
+        str(tmp_path),
+        "--split-manifest",
+        split_path.relative_to(tmp_path).as_posix(),
+    ]
+    for generator_id in (
+        "qwen2.5-7b-instruct",
+        "llama-3.1-8b-instruct",
+        "qwen2.5-32b-instruct",
+    ):
+        assert (
+            cli.main(
+                ["generate", *common, "--generator-id", generator_id],
+                split_loader=tiny_split_loader,
+                engine_factory_builder=factory_builder,
+            )
+            == 0
+        )
+
+    generation_path = next((tmp_path / "generation").glob("*/manifest.json"))
+    assert (
+        cli.main(
+            [
+                "generate",
+                *common,
+                "--generator-id",
+                "qwen2.5-32b-instruct",
+            ],
+            split_loader=tiny_split_loader,
+            engine_factory_builder=factory_builder,
+        )
+        == 0
+    )
+    assert (
+        cli.main(
+            [
+                "verify",
+                "--data-root",
+                str(tmp_path),
+                "--generation-manifest",
+                generation_path.relative_to(tmp_path).as_posix(),
+            ],
+            split_loader=tiny_split_loader,
+        )
+        == 0
+    )
+    verification_path = next((tmp_path / "verification").glob("*/manifest.json"))
+    audit_path = next((tmp_path / "audit").glob("*/manifest.json"))
+    selection_path = next((tmp_path / "audit").glob("*/selection.jsonl"))
+    selection = [
+        AuditSelectionRecord.from_dict(
+            {key: value for key, value in row.items() if key != "record_hash"}
+        )
+        for row in io.scan_jsonl(selection_path).records
+    ]
+    decisions_path = tmp_path / "human-decisions.jsonl"
+    for selected in selection:
+        append_record(
+            decisions_path,
+            AuditDecision(
+                selected.audit_run_id,
+                selected.generation_run_id,
+                selected.verification_run_id,
+                selected.record_kind,
+                selected.original_question_id,
+                selected.candidate_id,
+                AuditVerdict.AGREE,
+                selected.reason_code,
+                False,
+            ).to_dict(),
+        )
+
+    finalize_args = [
+        "finalize",
+        "--data-root",
+        str(tmp_path),
+        "--verification-manifest",
+        verification_path.relative_to(tmp_path).as_posix(),
+        "--audit-manifest",
+        audit_path.relative_to(tmp_path).as_posix(),
+        "--decisions",
+        decisions_path.relative_to(tmp_path).as_posix(),
+    ]
+    assert (
+        cli.main(
+            [*finalize_args, "--tokenizer-revision", "4" * 40],
+            split_loader=tiny_split_loader,
+            tokenizer_loader=lambda revision, root: UnitTokenizer(),
+        )
+        == 2
+    )
+    assert (
+        cli.main(
+            [*finalize_args, "--tokenizer-revision", TOKENIZER_REVISION],
+            split_loader=tiny_split_loader,
+            tokenizer_loader=lambda revision, root: UnitTokenizer(),
+        )
+        == 0
+    )
+    export = next((tmp_path / "trainer_export").glob("*/manifest.json"))
+    assert json.loads(export.read_text(encoding="utf-8"))["counts"] == {"rows": 2}
+    assert io.load_manifest(
+        tmp_path, export.relative_to(tmp_path).as_posix(), "trainer_export"
+    )["run_id"]
+    completed_audit = next((tmp_path / "audit").glob("*/completed.json"))
+    assert io.load_manifest(
+        tmp_path, completed_audit.relative_to(tmp_path).as_posix(), "audit"
+    )["counts"]["completed"] == len(selection)
+    report = next((tmp_path / "phase2").glob("*/gate-report.json"))
+    assert json.loads(report.read_text(encoding="utf-8"))["status"] == "FAIL"
