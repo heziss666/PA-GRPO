@@ -7,13 +7,19 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 import pyarrow.parquet as pq
+import pytest
 
 from permstudy.rollout_identity import (
     attach_permutation_identity,
     merge_identity_into_extra_infos,
     repeat_for_rollout,
 )
+from scripts_permstudy.data import _common as cli_io
+from scripts_permstudy.data import build_permutations as permutation_cli
+from scripts_permstudy.data import build_reasoning_pairs as pair_cli
+from scripts_permstudy.data import plan_generation as generation_cli
 from scripts_permstudy.data import run_fake_e2e as e2e
+from scripts_permstudy.data import verify_candidates as verification_cli
 from tests_permstudy.data_pipeline.test_trainer_export import FakeTrainerTokenizer
 from verl import DataProto
 from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
@@ -22,9 +28,19 @@ from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "data_pipeline"
 
 
-def test_independent_fresh_roots_preserve_all_blocking_research_semantics(tmp_path):
-    first = e2e.run_fake_e2e(tmp_path / "first", FIXTURES)
-    second = e2e.run_fake_e2e(tmp_path / "second", FIXTURES)
+@pytest.fixture(scope="module")
+def synthetic_runs(tmp_path_factory):
+    root = tmp_path_factory.mktemp("task17-fake-e2e")
+    return (
+        e2e.run_fake_e2e(root / "first", FIXTURES),
+        e2e.run_fake_e2e(root / "second", FIXTURES),
+    )
+
+
+def test_independent_fresh_roots_preserve_all_blocking_research_semantics(
+    synthetic_runs,
+):
+    first, second = synthetic_runs
     assert first.private_root != second.private_root
     assert (first.private_root / "canonical/assignments.jsonl").read_bytes() == (
         second.private_root / "canonical/assignments.jsonl"
@@ -48,13 +64,13 @@ def test_independent_fresh_roots_preserve_all_blocking_research_semantics(tmp_pa
 
 
 def test_synthetic_full_flow_preserves_research_semantics_and_trainer_identity(
-    tmp_path,
+    synthetic_runs,
 ):
     # A missing stage, changed split, or lost resume/rollout identity breaks this path.
     assert callable(getattr(e2e, "run_fake_e2e", None)), (
         "Task 17 orchestration is missing"
     )
-    summary = e2e.run_fake_e2e(tmp_path, FIXTURES)
+    summary = synthetic_runs[0]
     assert summary.question_count == 80
     assert summary.train_count == 72
     assert summary.holdout_count == 8
@@ -73,8 +89,40 @@ def test_synthetic_full_flow_preserves_research_semantics_and_trainer_identity(
     assert summary.trainer_row_hash == summary.resumed_trainer_row_hash
     assert summary.functional_passed is True
     assert summary.audit_required_count == summary.audit_completed_count > 0
-    assert summary.statistical_status in {"PASS", "PASS_WITH_WARNINGS", "FAIL"}
+    assert summary.statistical_status == "FAIL"
     assert "production" not in summary.public_summary().values()
+
+    def load_stage(stage):
+        manifests = list(summary.private_root.glob(f"{stage}/*/manifest.json"))
+        assert len(manifests) == 1
+        relative = manifests[0].relative_to(summary.private_root).as_posix()
+        return cli_io.load_manifest(summary.private_root, relative, stage)
+
+    split_manifest = load_stage("split")
+    split_result, formal_smoke = generation_cli.load_split(
+        summary.private_root, split_manifest
+    )
+    assert len(split_result.assignments) == 80
+    assert len(formal_smoke) == 40
+    generation_manifest = load_stage("generation")
+    formal_plan = generation_cli.load_plan(summary.private_root, generation_manifest)
+    assert len(formal_plan.candidates) == 240
+    verification_manifest = load_stage("verification")
+    formal_verification = verification_cli.load_verification(
+        summary.private_root, verification_manifest
+    )
+    assert len(formal_verification[2]) == 240
+    pair_manifest = load_stage("pairs")
+    assert len(pair_cli.load_pairs(summary.private_root, pair_manifest)) == 40
+    permutation_manifest = load_stage("permutations")
+    assert (
+        len(
+            permutation_cli.load_permutations(
+                summary.private_root, permutation_manifest
+            )
+        )
+        == 80
+    )
 
     def records(name):
         return [
@@ -176,7 +224,7 @@ def test_synthetic_full_flow_preserves_research_semantics_and_trainer_identity(
                 "filter_overlong_prompts": False,
                 "truncation": "error",
                 "return_raw_chat": True,
-                "cache_dir": str(tmp_path / "trainer_cache"),
+                "cache_dir": str(summary.private_root / "trainer_cache"),
             }
         ),
     )
@@ -195,5 +243,5 @@ def test_synthetic_full_flow_preserves_research_semantics_and_trainer_identity(
     public = summary.public_summary()
     assert public["mode"] == "synthetic_fake"
     assert public["count"] == 240
-    assert str(tmp_path) not in json.dumps(public)
+    assert str(summary.private_root) not in json.dumps(public)
     assert "Synthetic" not in json.dumps(public)

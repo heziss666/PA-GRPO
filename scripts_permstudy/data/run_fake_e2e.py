@@ -33,7 +33,6 @@ from permstudy.data_pipeline.schema import (
     AuditDecision,
     AuditVerdict,
     CandidateRecord,
-    RunManifest,
     Split,
     Source,
 )
@@ -46,6 +45,9 @@ from permstudy.data_pipeline.verification import (
     verify_math_question,
     verify_reclor_question,
 )
+
+
+SYNTHETIC_MANIFEST_TIMESTAMP = "2000-01-01T00:00:00+00:00"
 
 
 @dataclass(frozen=True)
@@ -136,37 +138,46 @@ def _read_candidates(path):
     )
 
 
-def _manifest(root, stage, config, records, *, extra=None):
-    # Use the existing package envelope: raw hashes of timestamped upstream
-    # manifest files belong to execution history, not research-semantic lineage.
-    refs = [
+def _manifest_path(manifest):
+    return f"{manifest['stage']}/{manifest['run_id']}/manifest.json"
+
+
+def _stabilize_synthetic_manifest(root, relative_path, stage):
+    """Fix only synthetic execution metadata before downstream file hashing."""
+    path = io.rooted(root, relative_path)
+    payload = io.read_json(path)
+    expected_hash = payload["output_manifest_hash"]
+    payload["created_at_utc"] = SYNTHETIC_MANIFEST_TIMESTAMP
+    if io.write_atomic_manifest(path, payload) != expected_hash:
+        raise io.IntegrityError()
+    return io.load_manifest(root, relative_path, stage)
+
+
+def _manifest(
+    root,
+    stage,
+    config,
+    records,
+    upstream_paths,
+    *,
+    artifact_refs=(),
+    counts=None,
+    extra=None,
+):
+    refs = list(artifact_refs) + [
         io.persist_records(root, f"canonical/{name}.jsonl", values)
         for name, values in records.items()
     ]
-    for ref in refs:
-        io.verify_artifact_ref(root, ref)
-    payload = dict(
-        schema_version="run_manifest_v1",
-        stage=stage,
-        run_id=run_id(stage, config),
-        config_hash=sha256_hex(canonical_json_bytes(config)),
-        typed_config=config,
-        upstream_bindings=config["upstream_bindings"],
-        upstream_manifest_hashes=sorted(config["upstream_bindings"].values()),
-        artifacts=[ref.to_dict() for ref in refs],
-        counts={name: len(values) for name, values in records.items()},
+    manifest = io.persist_manifest(
+        root,
+        stage,
+        config,
+        refs,
+        counts or {name: len(values) for name, values in records.items()},
+        upstream_paths,
+        extra=extra,
     )
-    payload.update(extra or {})
-    path = io.rooted(root, f"{stage}/{payload['run_id']}/manifest.json")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    digest = io.write_atomic_manifest(path, payload)
-    manifest = io.read_json(path)
-    core = RunManifest.from_dict(
-        {name: manifest[name] for name in RunManifest.__annotations__}
-    )
-    if core.output_manifest_hash != digest:
-        raise io.IntegrityError()
-    return manifest
+    return _stabilize_synthetic_manifest(root, _manifest_path(manifest), stage)
 
 
 def _selected_pairs(questions, candidates, verified, bindings):
@@ -251,6 +262,14 @@ def run_fake_e2e(data_root, fixture_root) -> FakeE2ESummary:
             root / "synthetic_reclor", root, acknowledge_noncommercial=True
         ),
     }
+    source_paths = {
+        role: (
+            f"sources/{snapshot.source.value}/{snapshot.source_snapshot_id}/manifest.json"
+        )
+        for role, snapshot in snapshots.items()
+    }
+    for relative_path in source_paths.values():
+        _stabilize_synthetic_manifest(root, relative_path, "sources")
     questions = tuple(
         sorted(
             (q for snapshot in snapshots.values() for q in snapshot.questions),
@@ -263,18 +282,21 @@ def run_fake_e2e(data_root, fixture_root) -> FakeE2ESummary:
     }
     split = splitting.build_bound_internal_split(snapshots, bindings, root)
     smoke = splitting.select_smoke_questions(split.assignments)
+    split_canonical_ref = io.persist_bytes(
+        root,
+        "canonical/split.canonical.jsonl",
+        splitting.split_manifest_bytes(questions, split),
+        81,
+    )
     split_manifest = _manifest(
         root,
         "split",
         splitting.split_stage_config(42, bindings),
         {"questions": questions, "assignments": split.assignments, "smoke": smoke},
+        source_paths,
+        artifact_refs=(split_canonical_ref,),
+        counts={"questions": len(questions), "smoke": len(smoke)},
         extra={"split_manifest_hash": split.split_manifest_hash},
-    )
-    io.persist_bytes(
-        root,
-        "canonical/split.canonical.jsonl",
-        splitting.split_manifest_bytes(questions, split),
-        81,
     )
     configs = tuple(
         GenerationConfig(
@@ -371,7 +393,20 @@ def run_fake_e2e(data_root, fixture_root) -> FakeE2ESummary:
             shard_size=8,
             split_upstream_manifest_hash=split_manifest["output_manifest_hash"],
         ),
-        {"candidates": clean},
+        {"plans": plan.candidates, "candidates": clean},
+        {"split": _manifest_path(split_manifest)},
+        artifact_refs=io.select_refs(
+            split_manifest,
+            "questions.jsonl",
+            "assignments.jsonl",
+            "smoke.jsonl",
+            "split.canonical.jsonl",
+        ),
+        counts={
+            "planned": len(plan.candidates),
+            "successful": len(clean),
+            "historical_failures": 0,
+        },
     )
     verify_config = verification_config(generation["output_manifest_hash"], 10.0, 10.0)
     verification_id = run_id("verification", verify_config)
@@ -410,6 +445,7 @@ def run_fake_e2e(data_root, fixture_root) -> FakeE2ESummary:
         "verification",
         verify_config,
         {"question_verifications": gold_records, "verifications": verified},
+        {"generation": _manifest_path(generation)},
     )
     selection = audit.build_audit_selection(
         verified,
@@ -444,6 +480,10 @@ def run_fake_e2e(data_root, fixture_root) -> FakeE2ESummary:
         "pairs",
         pairs.pair_stage_config("2" * 40, pair_bindings),
         {"pairs": selected_pairs},
+        {
+            "generation": _manifest_path(generation),
+            "verification": _manifest_path(verification),
+        },
     )
     perm_bindings = {"pairs": pair_manifest["output_manifest_hash"]}
     surface_records = tuple(
@@ -456,6 +496,7 @@ def run_fake_e2e(data_root, fixture_root) -> FakeE2ESummary:
         "permutations",
         permutations.permutation_stage_config(perm_bindings),
         {"permutations": surface_records},
+        {"pairs": _manifest_path(pair_manifest)},
     )
     inputs = gates.GateInputs(
         plan.candidates,
