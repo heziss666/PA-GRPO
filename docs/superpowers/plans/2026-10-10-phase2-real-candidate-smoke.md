@@ -31,13 +31,14 @@
 
 | Gate | Permitted work | Current state |
 | --- | --- | --- |
-| P0 — plan review | Edit and review this document only | Open |
-| P1 — activation review | Implement and CPU-test the single thin Phase 2 launcher; no GPU or model download | Hold |
+| P0 — plan review | Edit and review this document only | Approved |
+| P1 — activation review | Implement and CPU-test the single thin Phase 2 launcher; no GPU or model download | Open |
 | P2 — real-smoke execution | Rent the approved GPU, download pinned weights, and execute the 240-candidate smoke within the resource cap | Hold |
 | P3 — pilot proposal | Draft a separate 200-pair pilot plan from the completed smoke evidence | Hold |
 | P4 — pilot execution | Acquire more questions/candidates and run training | Hold |
 
-Approving this plan closes P0 only. P1, P2, P3, and P4 require separate explicit authorization.
+P0 and the reduced P1 scope have been explicitly approved. P2, P3, and P4
+remain closed and require separate explicit authorization.
 
 ## Known Execution Boundary
 
@@ -62,7 +63,21 @@ The entry point may call `GenerationConfig`, `plan_generation`, `VLLMGenerationB
 
 `VLLMGenerationBackend.generate()` calls `engine_factory` for every batch. The injected factory must therefore be a process-local caching closure that returns the same already-loaded engine for every batch and shard of that generator. The launcher must process all pending shards for that generator before destroying the engine. A process crash may construct one replacement engine and resume missing composite keys; normal shard progression must not reload weights. P1 tests belong under a new Phase 2-specific test path, such as `tests_permstudy/phase2/`, so the protected Phase 1 test tree remains unchanged.
 
-P1 review must prove, without a GPU, that request IDs map back to the correct `(generation_run_id, candidate_id)`, prompt selection is source-correct, return order is irrelevant, foreign or missing vLLM results fail closed, resume requests only missing composite candidate keys, and one fake engine instance is reused across multiple batches and shards. It must also run one synthetic package-API integration path from vLLM-shaped candidate records through verification, audit decisions, pair selection, AB/BA, Functional/Statistical Gates, trainer Parquet export, and the existing trainer identity round trip. This test proves the real entry point never falls back to the fake-only Phase 1 CLI loading chain.
+P1 review must prove, without a GPU, that request IDs map back to the correct
+`(generation_run_id, candidate_id)`, prompt selection is source-correct,
+out-of-order completion is harmless, foreign/duplicate/missing results fail
+closed, resume requests only missing composite candidate keys, and one fake
+engine instance is reused across multiple batches and shards. One tiny
+synthetic path must also show that vLLM-shaped candidate records reach the
+existing verification API and produce valid downstream pair/permutation
+records with intact lineage.
+
+P1 does **not** repeat the Phase 1 80-question/240-candidate synthetic E2E,
+Audit/Gate truth-table suites, trainer Parquet round trip, Windows/WSL matrix,
+or the full Phase 1 test suite. Those already-approved results remain the
+evidence for the frozen modules. P1 runs only its focused Phase 2 CPU test
+file, Ruff/format checks, `git diff --check`, and a byte-diff check proving
+that the protected Phase 1 paths remain identical to `main@34ef6f4`.
 
 ## Fixed Real-Smoke Recipe
 
