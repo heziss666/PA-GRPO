@@ -33,6 +33,7 @@ from permstudy.data_pipeline.schema import (
     AuditDecision,
     AuditVerdict,
     CandidateRecord,
+    RunManifest,
     Split,
     Source,
 )
@@ -135,25 +136,37 @@ def _read_candidates(path):
     )
 
 
-def _manifest(root, stage, config, records, upstream_paths, *, extra=None):
-    # Reuse Task 16 persistence; this is no additional manifest protocol.
+def _manifest(root, stage, config, records, *, extra=None):
+    # Use the existing package envelope: raw hashes of timestamped upstream
+    # manifest files belong to execution history, not research-semantic lineage.
     refs = [
         io.persist_records(root, f"canonical/{name}.jsonl", values)
         for name, values in records.items()
     ]
-    return io.persist_manifest(
-        root,
-        stage,
-        config,
-        refs,
-        {name: len(values) for name, values in records.items()},
-        upstream_paths,
-        extra=extra,
+    for ref in refs:
+        io.verify_artifact_ref(root, ref)
+    payload = dict(
+        schema_version="run_manifest_v1",
+        stage=stage,
+        run_id=run_id(stage, config),
+        config_hash=sha256_hex(canonical_json_bytes(config)),
+        typed_config=config,
+        upstream_bindings=config["upstream_bindings"],
+        upstream_manifest_hashes=sorted(config["upstream_bindings"].values()),
+        artifacts=[ref.to_dict() for ref in refs],
+        counts={name: len(values) for name, values in records.items()},
     )
-
-
-def _manifest_path(manifest):
-    return f"{manifest['stage']}/{manifest['run_id']}/manifest.json"
+    payload.update(extra or {})
+    path = io.rooted(root, f"{stage}/{payload['run_id']}/manifest.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    digest = io.write_atomic_manifest(path, payload)
+    manifest = io.read_json(path)
+    core = RunManifest.from_dict(
+        {name: manifest[name] for name in RunManifest.__annotations__}
+    )
+    if core.output_manifest_hash != digest:
+        raise io.IntegrityError()
+    return manifest
 
 
 def _selected_pairs(questions, candidates, verified, bindings):
@@ -255,10 +268,6 @@ def run_fake_e2e(data_root, fixture_root) -> FakeE2ESummary:
         "split",
         splitting.split_stage_config(42, bindings),
         {"questions": questions, "assignments": split.assignments, "smoke": smoke},
-        {
-            role: f"sources/{snapshot.source.value}/{snapshot.source_snapshot_id}/manifest.json"
-            for role, snapshot in snapshots.items()
-        },
         extra={"split_manifest_hash": split.split_manifest_hash},
     )
     io.persist_bytes(
@@ -363,7 +372,6 @@ def run_fake_e2e(data_root, fixture_root) -> FakeE2ESummary:
             split_upstream_manifest_hash=split_manifest["output_manifest_hash"],
         ),
         {"candidates": clean},
-        {"split": _manifest_path(split_manifest)},
     )
     verify_config = verification_config(generation["output_manifest_hash"], 10.0, 10.0)
     verification_id = run_id("verification", verify_config)
@@ -402,7 +410,6 @@ def run_fake_e2e(data_root, fixture_root) -> FakeE2ESummary:
         "verification",
         verify_config,
         {"question_verifications": gold_records, "verifications": verified},
-        {"generation": _manifest_path(generation)},
     )
     selection = audit.build_audit_selection(
         verified,
@@ -437,10 +444,6 @@ def run_fake_e2e(data_root, fixture_root) -> FakeE2ESummary:
         "pairs",
         pairs.pair_stage_config("2" * 40, pair_bindings),
         {"pairs": selected_pairs},
-        {
-            "generation": _manifest_path(generation),
-            "verification": _manifest_path(verification),
-        },
     )
     perm_bindings = {"pairs": pair_manifest["output_manifest_hash"]}
     surface_records = tuple(
@@ -453,7 +456,6 @@ def run_fake_e2e(data_root, fixture_root) -> FakeE2ESummary:
         "permutations",
         permutations.permutation_stage_config(perm_bindings),
         {"permutations": surface_records},
-        {"pairs": _manifest_path(pair_manifest)},
     )
     inputs = gates.GateInputs(
         plan.candidates,

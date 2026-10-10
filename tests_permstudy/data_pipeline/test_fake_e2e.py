@@ -22,6 +22,31 @@ from verl.utils.dataset.rl_dataset import RLHFDataset, collate_fn
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "data_pipeline"
 
 
+def test_independent_fresh_roots_preserve_all_blocking_research_semantics(tmp_path):
+    first = e2e.run_fake_e2e(tmp_path / "first", FIXTURES)
+    second = e2e.run_fake_e2e(tmp_path / "second", FIXTURES)
+    assert first.private_root != second.private_root
+    assert (first.private_root / "canonical/assignments.jsonl").read_bytes() == (
+        second.private_root / "canonical/assignments.jsonl"
+    ).read_bytes()
+    semantic_fields = (
+        "split_hash",
+        "successful_keys",
+        "semantic_candidate_set_hash",
+        "pair_hash",
+        "permutation_hash",
+        "trainer_row_hash",
+    )
+    differing = [
+        field
+        for field in semantic_fields
+        if getattr(first, field) != getattr(second, field)
+    ]
+    assert not differing, (
+        f"Independent fresh roots changed semantic outputs: {differing}"
+    )
+
+
 def test_synthetic_full_flow_preserves_research_semantics_and_trainer_identity(
     tmp_path,
 ):
