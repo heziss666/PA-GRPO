@@ -20,7 +20,9 @@ from ..schema import (
 
 
 MATH_VERIFY_VERSION = "0.9.0"
-MATH_PARSER_VERSION = "math_boxed_final_v1"
+MATH_GOLD_PARSER_VERSION = "math_gold_last_complete_v2"
+MATH_CANDIDATE_PARSER_VERSION = "math_boxed_final_v1"
+MATH_PARSER_VERSION = "math_gold_last_complete_v2__candidate_math_boxed_final_v1"
 MATH_VERIFIER_NAME = "math-verify"
 MATH_CANONICAL_REPRESENTATION_VERSION = "sympy_srepr_v1"
 
@@ -61,9 +63,19 @@ class BoxedAnswer:
         if self.status not in _EXTRACTION_STATUSES:
             raise ValueError("unknown boxed-answer status")
         if self.status == "parsed":
-            if not isinstance(self.boxed_text, str) or not self.boxed_text or self.error_type is not None:
-                raise ValueError("parsed boxed answer must contain one boxed expression")
-        elif self.boxed_text is not None or not isinstance(self.error_type, str) or not self.error_type:
+            if (
+                not isinstance(self.boxed_text, str)
+                or not self.boxed_text
+                or self.error_type is not None
+            ):
+                raise ValueError(
+                    "parsed boxed answer must contain one boxed expression"
+                )
+        elif (
+            self.boxed_text is not None
+            or not isinstance(self.error_type, str)
+            or not self.error_type
+        ):
             raise ValueError("unparsed boxed answer must contain one error type")
 
 
@@ -74,8 +86,21 @@ class _WorkerHandle:
 
 
 def extract_math_gold(solution: str) -> BoxedAnswer:
-    """Extract the unique terminal boxed answer from an official solution."""
-    return _extract_terminal_box(solution)
+    """Extract the last complete boxed answer from an official solution."""
+    if not isinstance(solution, str):
+        raise TypeError("MATH answer source must be text")
+    starts = _box_starts(solution)
+    if not starts:
+        return BoxedAnswer("invalid", None, "missing_final_marker")
+    complete: list[tuple[int, int]] = []
+    for start in starts:
+        end = _balanced_box_end(solution, start + len(_BOX_MARKER))
+        if end is not None:
+            complete.append((start, end))
+    if not complete:
+        return BoxedAnswer("invalid", None, "math_parse_failure")
+    start, end = complete[-1]
+    return BoxedAnswer("parsed", solution[start : end + 1], None)
 
 
 def extract_math_candidate(response: str) -> BoxedAnswer:
@@ -167,7 +192,9 @@ def verify_math_question(
                 if restarted_canonical_gold != canonical_gold:
                     _shutdown_worker(worker)
                     worker = None
-                    return _gold_error(question, verification_run_id, "gold_parse_failure"), []
+                    return _gold_error(
+                        question, verification_run_id, "gold_parse_failure"
+                    ), []
 
             outcome, error_type, canonical_prediction = _verify_in_worker(
                 worker,
@@ -213,7 +240,11 @@ def verify_math_question(
                     )
                 )
             else:
-                status = VerificationStatus.CORRECT if outcome == "correct" else VerificationStatus.INCORRECT
+                status = (
+                    VerificationStatus.CORRECT
+                    if outcome == "correct"
+                    else VerificationStatus.INCORRECT
+                )
                 verified.append(
                     _verification_record(
                         candidate,
@@ -234,14 +265,7 @@ def verify_math_question(
 def _extract_terminal_box(text: str) -> BoxedAnswer:
     if not isinstance(text, str):
         raise TypeError("MATH answer source must be text")
-    starts: list[int] = []
-    offset = 0
-    while True:
-        start = text.find(_BOX_MARKER, offset)
-        if start < 0:
-            break
-        starts.append(start)
-        offset = start + len(_BOX_MARKER)
+    starts = _box_starts(text)
     if not starts:
         return BoxedAnswer("invalid", None, "missing_final_marker")
 
@@ -259,6 +283,18 @@ def _extract_terminal_box(text: str) -> BoxedAnswer:
     if text[end + 1 :].strip():
         return BoxedAnswer("invalid", None, "prompt_contract_mismatch")
     return BoxedAnswer("parsed", boxed, None)
+
+
+def _box_starts(text: str) -> list[int]:
+    starts: list[int] = []
+    offset = 0
+    while True:
+        start = text.find(_BOX_MARKER, offset)
+        if start < 0:
+            break
+        starts.append(start)
+        offset = start + len(_BOX_MARKER)
+    return starts
 
 
 def _balanced_box_end(text: str, content_start: int) -> int | None:
@@ -319,7 +355,9 @@ def _validate_candidates(
             or plan.question_content_hash != question.question_content_hash
             or plan.source is not Source.MATH
         ):
-            raise MathVerificationError("candidate question identity does not match the MATH question")
+            raise MathVerificationError(
+                "candidate question identity does not match the MATH question"
+            )
         if plan.key in seen:
             raise MathVerificationError("duplicate composite candidate key")
         seen.add(plan.key)
@@ -409,17 +447,30 @@ def _worker_main(
             message = connection.recv()
             if message == (_STOP,):
                 return
-            if not isinstance(message, tuple) or len(message) != 2 or message[0] != _VERIFY:
+            if (
+                not isinstance(message, tuple)
+                or len(message) != 2
+                or message[0] != _VERIFY
+            ):
                 return
             try:
-                equivalent, canonical_prediction = candidate_verifier_hook(gold, message[1], worker_state)
+                equivalent, canonical_prediction = candidate_verifier_hook(
+                    gold, message[1], worker_state
+                )
                 if equivalent is None:
                     if canonical_prediction is not None:
-                        raise TypeError("ambiguous candidate must not carry a canonical prediction")
+                        raise TypeError(
+                            "ambiguous candidate must not carry a canonical prediction"
+                        )
                     connection.send((_CANDIDATE_RESULT, "ambiguous", None))
                 elif type(equivalent) is bool:
-                    if not isinstance(canonical_prediction, str) or not canonical_prediction:
-                        raise TypeError("verified candidate must carry a canonical prediction")
+                    if (
+                        not isinstance(canonical_prediction, str)
+                        or not canonical_prediction
+                    ):
+                        raise TypeError(
+                            "verified candidate must carry a canonical prediction"
+                        )
                     connection.send(
                         (
                             _CANDIDATE_RESULT,
@@ -428,7 +479,9 @@ def _worker_main(
                         )
                     )
                 else:
-                    raise TypeError("candidate verifier hook returned an unsupported result")
+                    raise TypeError(
+                        "candidate verifier hook returned an unsupported result"
+                    )
             except BaseException as error:
                 connection.send((_CANDIDATE_ERROR, sanitize_exception(error)))
     except (EOFError, BrokenPipeError, OSError):
@@ -448,7 +501,13 @@ def _start_worker(
     parent, child = context.Pipe(duplex=True)
     process = context.Process(
         target=_worker_main,
-        args=(child, boxed_gold, gold_parser_hook, candidate_verifier_hook, worker_state),
+        args=(
+            child,
+            boxed_gold,
+            gold_parser_hook,
+            candidate_verifier_hook,
+            worker_state,
+        ),
     )
     try:
         process.start()

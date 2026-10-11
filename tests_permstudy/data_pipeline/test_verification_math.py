@@ -42,7 +42,9 @@ def math_question(*, solution=r"Therefore the result is \boxed{\frac{1}{2}}"):
     )
 
 
-def candidate(candidate_id, response, *, sampling_index=0, generation_run_id=GENERATION_RUN_ID):
+def candidate(
+    candidate_id, response, *, sampling_index=0, generation_run_id=GENERATION_RUN_ID
+):
     plan = CandidatePlan(
         schema_version="candidate_plan_v1",
         generation_run_id=generation_run_id,
@@ -153,6 +155,62 @@ def test_strict_boxed_extraction(text, status, boxed_text, error_type):
     )
 
 
+@pytest.mark.parametrize(
+    ("solution", "boxed_text"),
+    [
+        (r"Therefore $\boxed{2}$.", r"\boxed{2}"),
+        (
+            r"Therefore $\boxed{\frac{1}{2}}$. Further explanation follows.",
+            r"\boxed{\frac{1}{2}}",
+        ),
+        (
+            r"An intermediate value is \boxed{1}; the final result is "
+            r"\boxed{\sqrt{2}} with units.",
+            r"\boxed{\sqrt{2}}",
+        ),
+        (
+            r"Malformed earlier \boxed{1, but final \boxed{2} is complete.",
+            r"\boxed{2}",
+        ),
+    ],
+    ids=["punctuation", "nested-and-explanation", "last-of-many", "last-complete"],
+)
+def test_official_gold_uses_last_complete_box_even_when_text_follows(
+    solution, boxed_text
+):
+    from permstudy.data_pipeline.verification import extract_math_gold
+
+    extracted = extract_math_gold(solution)
+
+    assert (extracted.status, extracted.boxed_text, extracted.error_type) == (
+        "parsed",
+        boxed_text,
+        None,
+    )
+
+
+def test_candidate_keeps_terminal_v1_when_gold_accepts_following_text():
+    from permstudy.data_pipeline.verification import extract_math_candidate
+
+    extracted = extract_math_candidate(r"Therefore $\boxed{2}$. Explanation.")
+
+    assert (extracted.status, extracted.boxed_text, extracted.error_type) == (
+        "invalid",
+        None,
+        "prompt_contract_mismatch",
+    )
+
+
+def test_verification_config_binds_combined_gold_v2_candidate_v1_parser_version():
+    from scripts_permstudy.data.verify_candidates import verification_config
+
+    config = verification_config("1" * 64, 30.0, 15.0)
+
+    assert config["parameters"]["math_parser_version"] == (
+        "math_gold_last_complete_v2__candidate_math_boxed_final_v1"
+    )
+
+
 def test_math_verify_explicitly_establishes_equivalent_and_non_equivalent_candidates():
     from permstudy.data_pipeline.verification import verify_math_question
 
@@ -202,7 +260,11 @@ def test_math_verify_explicitly_establishes_equivalent_and_non_equivalent_candid
     ]
     assert all(record.verifier_name == "math-verify" for record in verified)
     assert all(record.verifier_version == "0.9.0" for record in verified)
-    assert all(record.parser_version == "math_boxed_final_v1" for record in verified)
+    assert all(
+        record.parser_version
+        == "math_gold_last_complete_v2__candidate_math_boxed_final_v1"
+        for record in verified
+    )
     assert all(record.verifier_timeout_seconds == 5.0 for record in verified)
 
 
@@ -211,12 +273,13 @@ def test_math_verify_explicitly_establishes_equivalent_and_non_equivalent_candid
     [
         "No official boxed result.",
         r"Malformed \boxed{\frac{1}{2}",
-        r"\boxed{1}\n\boxed{2}",
         r"\boxed{???}",
     ],
-    ids=["missing", "malformed", "conflicting", "unparseable"],
+    ids=["missing", "malformed", "unparseable"],
 )
-def test_gold_extraction_failure_emits_one_question_error_and_no_candidate_records(solution):
+def test_gold_extraction_failure_emits_one_question_error_and_no_candidate_records(
+    solution,
+):
     from permstudy.data_pipeline.verification import verify_math_question
 
     gold, verified = verify_math_question(
@@ -274,7 +337,9 @@ def test_normal_six_candidate_question_parses_gold_once_under_spawn():
 
     assert gold.gold_parse_status == "ok"
     assert len(verified) == 6
-    assert all(record.verification_status is VerificationStatus.CORRECT for record in verified)
+    assert all(
+        record.verification_status is VerificationStatus.CORRECT for record in verified
+    )
     assert gold_parse_count.value == 1
 
 
@@ -395,9 +460,14 @@ def test_picklable_worker_candidate_exception_becomes_sanitized_error():
 
 def test_math_verify_version_mismatch_fails_before_worker_start(monkeypatch):
     import permstudy.data_pipeline.verification.math as math_verification
-    from permstudy.data_pipeline.verification import DependencyContractError, verify_math_question
+    from permstudy.data_pipeline.verification import (
+        DependencyContractError,
+        verify_math_question,
+    )
 
-    monkeypatch.setattr(math_verification, "distribution_version", lambda _name: "0.8.0")
+    monkeypatch.setattr(
+        math_verification, "distribution_version", lambda _name: "0.8.0"
+    )
 
     with pytest.raises(DependencyContractError, match="0.9.0"):
         verify_math_question(
@@ -410,10 +480,15 @@ def test_math_verify_version_mismatch_fails_before_worker_start(monkeypatch):
 
 
 def test_math_verification_rejects_candidate_question_identity_mismatch():
-    from permstudy.data_pipeline.verification import MathVerificationError, verify_math_question
+    from permstudy.data_pipeline.verification import (
+        MathVerificationError,
+        verify_math_question,
+    )
 
     record = candidate("candidate_1", r"\boxed{1}")
-    mismatched = replace(record, plan=replace(record.plan, question_content_hash="9" * 64))
+    mismatched = replace(
+        record, plan=replace(record.plan, question_content_hash="9" * 64)
+    )
 
     with pytest.raises(MathVerificationError, match="question identity"):
         verify_math_question(

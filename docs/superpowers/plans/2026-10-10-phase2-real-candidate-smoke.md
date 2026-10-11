@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Phase 1 is complete and frozen at `main@34ef6f4`; do not change `permstudy/data_pipeline/`, `scripts_permstudy/data/`, or their Phase 1 tests, manifests, audit rules, gates, parsers, verifiers, pair selection, and trainer export to make the real smoke pass.
+- Phase 1 is complete and frozen at `main@34ef6f4`; do not change `permstudy/data_pipeline/`, `scripts_permstudy/data/`, or their Phase 1 tests, manifests, audit rules, gates, parsers, verifiers, pair selection, and trainer export to make the real smoke pass. The sole approved exception is the evidence-backed MATH official-gold parser v2 correction recorded below; candidate parsing, gates, and all other frozen behavior remain unchanged.
 - This document does not authorize AutoDL rental, model downloads, vLLM startup, candidate generation, or the 200-pair pilot.
 - The smoke contains exactly 20 MATH and 20 ReClor questions selected by the approved Phase 1 split, three immutable generators, and two samples per question: `40 × 3 × 2 = 240` planned candidate identities.
 - The approved generators and revisions are:
@@ -217,6 +217,7 @@ Actual floating-point GPU hours, peak VRAM, disk/cache use, hourly price, and bi
 - [ ] Use the Phase 2 entry point to load the real generation artifacts directly, validate their existing schemas and lineage, and pass the resulting records to package APIs. Do not invoke `verify_candidates.py` or any other fake-only downstream CLI loader for the real run.
 - [ ] Call the existing ReClor strict terminal parser and official-label exact match; never infer gold from prompt or response text.
 - [ ] Call the existing MATH verifier with `math-verify==0.9.0`, parent-enforced `gold_timeout_seconds=30`, and `candidate_timeout_seconds=15`.
+- [ ] Keep the MATH parsing contracts distinct: official source gold uses `math_gold_last_complete_v2` (the last balanced `\boxed{...}` may be followed by official prose or punctuation), while generated candidates continue to use strict terminal `math_boxed_final_v1`. The combined version is part of the verification config hash.
 - [ ] Require each successful candidate to resolve to exactly one of `correct`, `incorrect`, `invalid`, `ambiguous`, or `error`; keep `gold_verification_error` question-level.
 - [ ] Build the existing `audit_seed=42`, `max_per_cell=5` selection from the exact verification snapshot.
 - [ ] Human reviewer 1 inspects every `invalid`, `ambiguous`, `error`, and `gold_verification_error`, plus the selected `correct/incorrect` samples stratified by `source × generator × status`.
@@ -227,6 +228,8 @@ Actual floating-point GPU hours, peak VRAM, disk/cache use, hourly price, and bi
 **Responsibility:** Automation may prepare identities and statistics, but a human research owner owns the audit verdicts and signs the final audit summary. The agent must not invent AGREE decisions or infer them from verifier output.
 
 **Failure handling:** A confirmed false `correct/incorrect` or systematic prompt/parser/verifier defect blocks expansion. A verifier-only correction reuses the immutable candidates and reruns verification, audit, pair, permutation, export, and gates. A prompt or generation-config correction requires a new generation run.
+
+**Observed protocol correction (2026-10-11):** The first real verification run rejected all 20 MATH gold solutions before equivalence checking because official solutions contained delimiters, punctuation, or explanatory text after a balanced boxed answer. The approved v2 correction changes only official-gold extraction and creates a new verification namespace; the immutable 240-candidate generation run is reused. Any gold expression that still cannot be uniquely parsed remains `gold_verification_error` and is not manually rewritten.
 
 ## Task 4: Functional and Statistical Gates
 
