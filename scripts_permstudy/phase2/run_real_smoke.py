@@ -968,7 +968,7 @@ def _dispatch_finalize(args, root: Path, *, split_loader, tokenizer_loader):
     }
     io.persist_bytes(
         root,
-        f"phase2/{plan.generation_run_id}/gate-report.json",
+        (f"phase2/{plan.generation_run_id}/{verification['run_id']}/gate-report.json"),
         canonical_json_bytes(report),
         1,
     )

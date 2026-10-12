@@ -635,5 +635,18 @@ def test_cli_generate_verify_finalize_writes_one_formal_resumable_chain(
     assert io.load_manifest(
         tmp_path, completed_audit.relative_to(tmp_path).as_posix(), "audit"
     )["counts"]["completed"] == len(selection)
-    report = next((tmp_path / "phase2").glob("*/gate-report.json"))
+    verification_run_id = json.loads(verification_path.read_text(encoding="utf-8"))[
+        "run_id"
+    ]
+    generation_run_id = json.loads(generation_path.read_text(encoding="utf-8"))[
+        "run_id"
+    ]
+    report = (
+        tmp_path
+        / "phase2"
+        / generation_run_id
+        / verification_run_id
+        / "gate-report.json"
+    )
+    assert report.is_file()
     assert json.loads(report.read_text(encoding="utf-8"))["status"] == "FAIL"
