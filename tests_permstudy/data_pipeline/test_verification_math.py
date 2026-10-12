@@ -43,7 +43,12 @@ def math_question(*, solution=r"Therefore the result is \boxed{\frac{1}{2}}"):
 
 
 def candidate(
-    candidate_id, response, *, sampling_index=0, generation_run_id=GENERATION_RUN_ID
+    candidate_id,
+    response,
+    *,
+    sampling_index=0,
+    generation_run_id=GENERATION_RUN_ID,
+    finish_reason="stop",
 ):
     plan = CandidatePlan(
         schema_version="candidate_plan_v1",
@@ -62,7 +67,7 @@ def candidate(
     return CandidateRecord(
         plan=plan,
         response=response,
-        finish_reason="stop",
+        finish_reason=finish_reason,
         generated_token_count=8,
         model_revision=MODEL_REVISION,
     )
@@ -156,6 +161,82 @@ def test_strict_boxed_extraction(text, status, boxed_text, error_type):
 
 
 @pytest.mark.parametrize(
+    "suffix",
+    [
+        "$",
+        "$$",
+        r"\)",
+        r"\]",
+        ".",
+        "$.",
+        r"\).",
+        r"\]。",
+        r"!\)",
+        "  $  .  \r\n",
+    ],
+    ids=[
+        "inline-dollar",
+        "display-dollar",
+        "inline-paren",
+        "display-bracket",
+        "punctuation-only",
+        "dollar-then-punctuation",
+        "paren-then-punctuation",
+        "bracket-then-cjk-punctuation",
+        "punctuation-then-paren",
+        "whitespace-between-tail-tokens",
+    ],
+)
+def test_candidate_v2_accepts_only_allowlisted_latex_closers_and_one_punctuation(
+    suffix,
+):
+    from permstudy.data_pipeline.verification import extract_math_candidate
+
+    extracted = extract_math_candidate(r"Reasoning $\boxed{2}" + suffix)
+
+    assert (extracted.status, extracted.boxed_text, extracted.error_type) == (
+        "parsed",
+        r"\boxed{2}",
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        " is the answer.",
+        " 2",
+        r"\text{done}",
+        r"\(",
+        "..",
+        "$$$",
+        r"\)\]",
+        r"$. trailing",
+    ],
+    ids=[
+        "prose",
+        "digit",
+        "tex-command",
+        "opening-delimiter",
+        "two-punctuation",
+        "three-dollar-signs",
+        "two-closers",
+        "allowlisted-prefix-plus-prose",
+    ],
+)
+def test_candidate_v2_rejects_nonallowlisted_or_ambiguous_tail(suffix):
+    from permstudy.data_pipeline.verification import extract_math_candidate
+
+    extracted = extract_math_candidate(r"Reasoning $\boxed{2}" + suffix)
+
+    assert (extracted.status, extracted.boxed_text, extracted.error_type) == (
+        "invalid",
+        None,
+        "prompt_contract_mismatch",
+    )
+
+
+@pytest.mark.parametrize(
     ("solution", "boxed_text"),
     [
         (r"Therefore $\boxed{2}$.", r"\boxed{2}"),
@@ -189,7 +270,7 @@ def test_official_gold_uses_last_complete_box_even_when_text_follows(
     )
 
 
-def test_candidate_keeps_terminal_v1_when_gold_accepts_following_text():
+def test_candidate_v2_still_rejects_explanation_after_allowlisted_wrapper():
     from permstudy.data_pipeline.verification import extract_math_candidate
 
     extracted = extract_math_candidate(r"Therefore $\boxed{2}$. Explanation.")
@@ -201,14 +282,41 @@ def test_candidate_keeps_terminal_v1_when_gold_accepts_following_text():
     )
 
 
-def test_verification_config_binds_combined_gold_v2_candidate_v1_parser_version():
+def test_verification_config_binds_combined_gold_v2_candidate_v2_parser_version():
     from scripts_permstudy.data.verify_candidates import verification_config
 
     config = verification_config("1" * 64, 30.0, 15.0)
 
     assert config["parameters"]["math_parser_version"] == (
-        "math_gold_last_complete_v2__candidate_math_boxed_final_v1"
+        "math_gold_last_complete_v2__candidate_math_boxed_final_tail_whitelist_v2"
     )
+
+
+def test_length_finished_candidate_is_invalid_without_candidate_verification():
+    from permstudy.data_pipeline.verification import verify_math_question
+
+    _, verified = verify_math_question(
+        math_question(),
+        [
+            candidate(
+                "truncated_after_box",
+                r"Reasoning \boxed{\frac{1}{2}}",
+                finish_reason="length",
+            )
+        ],
+        gold_timeout_seconds=3.0,
+        candidate_timeout_seconds=3.0,
+        verification_run_id=VERIFICATION_RUN_ID,
+        gold_parser_hook=counting_gold_parser,
+        candidate_verifier_hook=fail_if_candidate_called,
+        worker_state=multiprocessing.get_context("spawn").Value("i", 0),
+    )
+
+    assert len(verified) == 1
+    assert verified[0].verification_status is VerificationStatus.INVALID
+    assert verified[0].prediction_parse_status == "invalid"
+    assert verified[0].canonical_prediction is None
+    assert verified[0].error_type == "prompt_contract_mismatch"
 
 
 def test_math_verify_explicitly_establishes_equivalent_and_non_equivalent_candidates():
@@ -261,8 +369,8 @@ def test_math_verify_explicitly_establishes_equivalent_and_non_equivalent_candid
     assert all(record.verifier_name == "math-verify" for record in verified)
     assert all(record.verifier_version == "0.9.0" for record in verified)
     assert all(
-        record.parser_version
-        == "math_gold_last_complete_v2__candidate_math_boxed_final_v1"
+        record.parser_version == "math_gold_last_complete_v2"
+        "__candidate_math_boxed_final_tail_whitelist_v2"
         for record in verified
     )
     assert all(record.verifier_timeout_seconds == 5.0 for record in verified)

@@ -7,6 +7,7 @@ import json
 import math
 import multiprocessing
 from multiprocessing.connection import Connection
+import re
 
 from ..isolation import sanitize_exception
 from ..schema import (
@@ -21,12 +22,20 @@ from ..schema import (
 
 MATH_VERIFY_VERSION = "0.9.0"
 MATH_GOLD_PARSER_VERSION = "math_gold_last_complete_v2"
-MATH_CANDIDATE_PARSER_VERSION = "math_boxed_final_v1"
-MATH_PARSER_VERSION = "math_gold_last_complete_v2__candidate_math_boxed_final_v1"
+MATH_CANDIDATE_PARSER_VERSION = "math_boxed_final_tail_whitelist_v2"
+MATH_PARSER_VERSION = (
+    "math_gold_last_complete_v2__candidate_math_boxed_final_tail_whitelist_v2"
+)
 MATH_VERIFIER_NAME = "math-verify"
 MATH_CANONICAL_REPRESENTATION_VERSION = "sympy_srepr_v1"
 
 _BOX_MARKER = r"\boxed{"
+_LATEX_CLOSER = r"(?:\$\$|\$|\\\)|\\\])"
+_SINGLE_PUNCTUATION = r"[.,;:!?。．，；：！？]"
+_CANDIDATE_TAIL = re.compile(
+    rf"\A\s*(?:(?:{_LATEX_CLOSER})(?:\s*{_SINGLE_PUNCTUATION})?"
+    rf"|(?:{_SINGLE_PUNCTUATION})(?:\s*{_LATEX_CLOSER})?)?\s*\Z"
+)
 _EXTRACTION_STATUSES = frozenset({"parsed", "invalid", "ambiguous"})
 _GOLD_READY = "GOLD_READY"
 _GOLD_ERROR = "GOLD_ERROR"
@@ -158,6 +167,19 @@ def verify_math_question(
     verified: list[VerificationRecord] = []
     try:
         for candidate in materialized:
+            if candidate.finish_reason == "length":
+                verified.append(
+                    _verification_record(
+                        candidate,
+                        verification_run_id,
+                        candidate_timeout_seconds,
+                        VerificationStatus.INVALID,
+                        "invalid",
+                        None,
+                        "prompt_contract_mismatch",
+                    )
+                )
+                continue
             extracted = extract_math_candidate(candidate.response)
             if extracted.status != "parsed":
                 status = (
@@ -280,7 +302,7 @@ def _extract_terminal_box(text: str) -> BoxedAnswer:
             return BoxedAnswer("ambiguous", None, "conflicting_markers")
         return BoxedAnswer("invalid", None, "duplicate_same_marker")
     boxed, end = boxes[0]
-    if text[end + 1 :].strip():
+    if _CANDIDATE_TAIL.fullmatch(text[end + 1 :]) is None:
         return BoxedAnswer("invalid", None, "prompt_contract_mismatch")
     return BoxedAnswer("parsed", boxed, None)
 
