@@ -1,35 +1,41 @@
 {
   "artifact_hashes": {
-    "audit_completed_manifest": "433b210e130fae8244af10be7e2821f5028e4969bcbd997b5220343449505116",
-    "audit_decisions": "a798583f05b40500b864e6931616d238850de69d50ecbb6ff63db8aaf6209688",
-    "audit_selection": "1242eefaab7bf1c80395ce8b7a60fcd311a3aa7fff98c43549dbfc7e3bf11b63",
-    "gate_report": "902660f402bb80f740ea62d94a0993a58691a5df8c96a04a877962d1454b95cd",
+    "audit_completed_manifest": "df5130319f9bc137f4021835df06a0d75960752e19516943c3808bb6c92116db",
+    "audit_decisions": "6cd632b49c762bf6066540ad824e21c1e1533d804dc871340a9d2d82cf87c758",
+    "audit_selection": "caa3749c73d4768e95b2eb2714b3d8c7883d8e70989bf5d1bc86f4d12a116fe1",
+    "gate_report": "0c4ca4d4ca8c34afcc2883e42e9c2084d73b996519839c4f69f65d7586c5aa0c",
     "generation_manifest": "3dd369850216b92754ae2cba80b2b535351fb621106ea604ec27e44d00424ceb",
-    "pairs_manifest": "70348846bb2eab73fd00454fb47ed9193dd3a29d7a09b91fc9e873f563a07352",
-    "permutations_manifest": "e2d42b928d9fb66e0a8fa9f00212da8aee4b1601b00a06d9f68b3207ecf88f1b",
+    "pairs_manifest": "b729ab9db75b028bbeb347868f0fd637e7822d39e5a3be3a17f717472ed64f00",
+    "permutations_manifest": "55aafd34d58d53a74955f73080677d2e5c0658c9f2288ccb0e5d0e34d677cf3a",
     "split_manifest": "5dd6d696403d23576b695e3da97eaa7c0d66c9d759662ea212bc70b8acd7ded8",
-    "trainer_dataset": "2fab96ed5af66fdcd20d723a9794031b56495189fd30c37c28a96be3d16a79aa",
-    "trainer_export_manifest": "d6b8c9e5187646dfa2d70204d5bd8b14ae02f3d69e2b5abbaafbceb2d6cb22af",
-    "verification_manifest": "08ece1f12b48e75bf39c5501b9ce80499aa610987f0ca19f24787706ffc07dd1"
+    "trainer_dataset": "66a956d7b0eba90535738a56165ef330f29d2083c5eedd9eebeec1aedc77a3d3",
+    "trainer_export_manifest": "77f443e14655a2f664a46195273b9e8a9465c118c094915ae0bf509040022030",
+    "verification_manifest": "2535070d3c8a31c0d96d8fe2426cb19aa8d1f80aad54020d55a4e89049166043"
   },
   "completion_counts": {
-    "audit_agree": 166,
-    "audit_completed": 167,
+    "audit_agree": 129,
+    "audit_completed": 130,
     "audit_disagree": 1,
-    "audit_selected": 167,
+    "audit_selected": 130,
     "audit_unsure": 0,
     "confirmed_disagreements": 1,
     "generator_count": 3,
     "hard_failures": 7,
+    "machine_math_pair_count": 3,
+    "machine_math_pair_yield_percent": 15,
     "planned_candidates": 240,
     "samples_per_item": 2,
     "source_parse_failures": 1,
     "successful_candidates": 240,
-    "trainer_rows": 14,
+    "trainer_rows": 18,
+    "training_authorized_count": 0,
+    "trusted_math_pair_count": 2,
+    "trusted_math_pair_yield_percent": 10,
+    "trusted_pair_count": 8,
     "verified_candidates": 234,
-    "warnings": 5
+    "warnings": 1
   },
-  "git_sha": "4fcd664a16441cd61478052fd9d47eb61043921c",
+  "git_sha": "5aaf74086c059ae3e114a4731feaa8f40b7c643c",
   "package_versions": {
     "datasets": "4.4.1",
     "huggingface_hub": "0.36.0",
@@ -39,8 +45,8 @@
     "tokenizers": "0.22.1",
     "transformers": "4.57.1"
   },
-  "pair_count": 7,
-  "permutation_count": 14,
+  "pair_count": 9,
+  "permutation_count": 18,
   "phase_status": "REAL_SMOKE_FAIL",
   "platform": "wsl_ubuntu_24.04",
   "python_version": "3.12.3",
@@ -55,15 +61,17 @@
   },
   "real_generation_performed": true,
   "run_ids": {
-    "audit": "c51bcd57b8c7120e83cf02c93317b1e885feaaaf28dda0d160308c3db6721a22",
+    "audit": "2fc778af1f9f532f474fc986b0d957c80f6278dd46ecabcf75be4ecaffc56dce",
+    "candidate_parser_v2_git_sha": "98021d2164b126170f0cf38608c28ab2ddb6dadb",
+    "gate_namespace_git_sha": "5aaf74086c059ae3e114a4731feaa8f40b7c643c",
     "generation": "1f8b11a76f2e842af0f373ee4aa3e667c556bcc81ca22d0eac1e86e34a635a6f",
     "p1_launcher_git_sha": "4fcd664a16441cd61478052fd9d47eb61043921c",
-    "pairs": "caad24ef6073ac0fd2b117588e62b04110d5a937ea562b1cfb473ffcaeefdca2",
+    "pairs": "6aa73793b80e62a722a5a883b181c9ad8f7fffd87016fc64fe791fcc1351cdf7",
     "parser_v2_git_sha": "186486cc4f8c7f5ee75d655101bdef6cf8ed965d",
-    "permutations": "21d39a45cdee9029e8410894d830119f663da44670fd9f0c3a7cb73066d1e749",
+    "permutations": "5523949b8d332fa5985368e58fe8f2232f671d922eabd02d1abffbad4eaee09b",
     "phase1_baseline_git_sha": "34ef6f4f0825d042d8ae8f1038afc7daa364a75f",
-    "trainer_export": "74dea07196ea004950de63d5fc358415dc626a7a2e7fb09561ee46facb9bce8d",
-    "verification": "1e5700490c63f3baf191cd8a7a4a848979f18654b5b311b8911ae1d960871390"
+    "trainer_export": "f4bd44fcbfb844abd287d93c56466b0879d01a75a9617e1e4a3a49910a501e85",
+    "verification": "ed03b15798c473128d7cb3e0c9f974dd61483442ec5b4a1f618108b526cfe824"
   },
   "schema_version": "phase2_real_smoke_v1",
   "semantic_candidate_set_hash": "b0c7ec9f5cd22438af659d2ce08e19c1d7b493fe1b11a97b06fa20984ea5f08f",
@@ -86,9 +94,9 @@
   },
   "verification_status_counts": {
     "ambiguous": 0,
-    "correct": 93,
+    "correct": 135,
     "error": 0,
     "incorrect": 18,
-    "invalid": 123
+    "invalid": 81
   }
 }
