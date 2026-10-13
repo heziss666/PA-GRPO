@@ -22,6 +22,7 @@ import re
 import torch
 from datetime import datetime
 
+from permstudy.controlled_evaluator import extract_controlled_answer
 from permstudy.reward_pairing import build_reward_pairing
 
 # 获取当前文件所在目录，用于构建相对路径
@@ -182,6 +183,7 @@ def compute_score(
     consistency_weight: float = 1,
     identity_mode: str = "legacy_index",
     return_dict: bool = False,
+    evaluation_contract: str = "official",
 ):
     """Batch reward function for verl's ``BatchRewardManager`` (Judge / Qwen3).
 
@@ -200,10 +202,14 @@ def compute_score(
             pairing; ``explicit`` pairs by ``(pair_id, rollout_slot)``.
         return_dict: If True, return a dict with both the reward tensor and
             per-component breakdowns; otherwise return only the tensor.
+        evaluation_contract: ``official`` preserves permissive answer parsing;
+            ``controlled`` uses the strict two-option thinking evaluator.
 
     Returns:
         ``torch.FloatTensor`` of shape ``(N,)`` (or a dict, see ``return_dict``).
     """
+    if evaluation_contract not in {"official", "controlled"}:
+        raise ValueError(f"unsupported evaluation_contract: {evaluation_contract!r}")
     if extra_infos is None:
         extra_infos = [dict() for _ in range(len(solution_strs))]
 
@@ -220,6 +226,7 @@ def compute_score(
     correctness_scores = [0.0] * N
     format_scores = [0.0] * N
     length_scores = [0.0] * N
+    base_scores = [0.0] * N
     consistency_scores = [0.0] * N
     consistency_unpaired = [0.0] * N
 
@@ -251,11 +258,18 @@ def compute_score(
         pair_ids[i] = pair_id
 
         sol = solution_strs[i]
+        if evaluation_contract == "controlled" and not isinstance(sol, str):
+            sol = ""
         gt = ground_truths[i]
 
         safe_log_output(idx, pid, cuda_device, sol)
 
-        ans, confidence, method = extract_answer_with_confidence(sol)
+        if evaluation_contract == "controlled":
+            ans = extract_controlled_answer(sol, mode="thinking", num_options=2)
+            confidence = 1.0 if ans is not None else 0.0
+            method = "controlled_answer_tag" if ans is not None else "controlled_invalid"
+        else:
+            ans, confidence, method = extract_answer_with_confidence(sol)
         answers[i] = ans
         confidences[i] = confidence
         extraction_methods[i] = method
@@ -290,6 +304,7 @@ def compute_score(
             base_score = score_corr + bonus_format + length_reward
 
         scores[i] = float(base_score)
+        base_scores[i] = float(base_score)
         correctness_scores[i] = float(score_corr)
         format_scores[i] = float(bonus_format)
         length_scores[i] = float(length_reward)
@@ -409,6 +424,7 @@ def compute_score(
         "correctness": [float(x) for x in correctness_scores],
         "format": [float(x) for x in format_scores],
         "length": [float(x) for x in length_scores],
+        "base_reward": [float(x) for x in base_scores],
         "consistency": [float(x) for x in consistency_scores],
         "confidence": [float(x) for x in confidences],
         "extraction_method": extraction_methods,
