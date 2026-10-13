@@ -1,0 +1,68 @@
+{
+  "artifact_hashes": {
+    "audit_completed_manifest": "aeff730c250ce672027eabeb23e374c1fae75abefe265b9be7ade9c4f04f813a",
+    "audit_decisions": "2771c5fbe9e574ef2f63a502c62ea6543462b24e6c8f19705ef437d736886bff",
+    "audit_selection_manifest": "63aca6d801b8b2d8f53dea506feda85b047a222229b8d3a2fb515ca3f10731dd",
+    "gate_report": "4bb64bb8dbc5eae231a5ac111edbc96159f579a3f3551b13d52ac9d50793554c",
+    "generation_manifest": "3dd369850216b92754ae2cba80b2b535351fb621106ea604ec27e44d00424ceb",
+    "pairs_manifest": "1780ef30c7cbff19ab9f5f5f90f8501dd86a76c2f54dc528314ad7f3939c4749",
+    "permutations_manifest": "a97c63de525e893be6d4d343da16135598aa83322fc45ca884490f4ff8fd9db5",
+    "trainer_dataset": "f388af2b66b23c1045783c1b18012fbeb39a174384cefbebda38de7712bae65e",
+    "trainer_export_manifest": "c88a55c7085c6a3c3f37331ad14a3281f7825d741f700ddc78ddb9edfbfdb933",
+    "verification_manifest": "312a83d70ec7e77ca51d23dbeebea781e6d1a1cc5a6f451ba7f289b9d179b4b0"
+  },
+  "completion_counts": {
+    "audit_agree": 120,
+    "audit_completed": 121,
+    "audit_disagree": 1,
+    "audit_selected": 121,
+    "confirmed_disagreements": 1,
+    "hard_failures": 7,
+    "machine_math_pair_count": 3,
+    "planned_candidates": 240,
+    "reclor_invalid_remaining": 15,
+    "reclor_llama_invalid_remaining": 14,
+    "reclor_recovered_correct": 4,
+    "reclor_recovered_incorrect": 5,
+    "successful_candidates": 240,
+    "trainer_rows": 26,
+    "training_authorized_count": 0,
+    "trusted_math_pair_count": 2,
+    "trusted_pair_count": 12,
+    "verified_candidates": 234,
+    "warnings": 1
+  },
+  "git_sha": "aa929c84b5d65b4496c24c2b9bcaefd084fb091d",
+  "pair_count": 13,
+  "permutation_count": 26,
+  "phase_status": "REAL_SMOKE_FAIL",
+  "platform": "windows_native",
+  "python_version": "3.12.15",
+  "question_counts": {
+    "math_smoke": 20,
+    "reclor_smoke": 20,
+    "total_smoke": 40
+  },
+  "question_verification_status_counts": {
+    "ok": 39,
+    "parse_failure": 1
+  },
+  "real_generation_performed": true,
+  "run_ids": {
+    "audit": "711f674fe17ddc3edb4c8bddf3d6a9102affa2fd7d575188e2e8d2bbbfa46029",
+    "generation": "1f8b11a76f2e842af0f373ee4aa3e667c556bcc81ca22d0eac1e86e34a635a6f",
+    "pairs": "faed9ecb91e07e74c32a56279f4fa1fd89d9a47f7dc4b60c1507875a16d2fa01",
+    "permutations": "44e3f852f32bd297839a293bc99321b622c62e4c638848425071567fa1f413af",
+    "trainer_export": "3be61c8120e77b856bd821974f471e9203336b31375a2329db3ef87770c20a5c",
+    "verification": "200fbd26801aa5e2718fb885c02790ccb3330fff7fd2dad353bab19304166237"
+  },
+  "schema_version": "phase2_real_smoke_v1",
+  "semantic_candidate_set_hash": "b0c7ec9f5cd22438af659d2ce08e19c1d7b493fe1b11a97b06fa20984ea5f08f",
+  "verification_status_counts": {
+    "ambiguous": 0,
+    "correct": 139,
+    "error": 0,
+    "incorrect": 23,
+    "invalid": 72
+  }
+}
