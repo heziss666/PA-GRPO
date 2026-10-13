@@ -21,10 +21,10 @@ from ..schema import (
 
 
 MATH_VERIFY_VERSION = "0.9.0"
-MATH_GOLD_PARSER_VERSION = "math_gold_last_complete_v2"
+MATH_GOLD_PARSER_VERSION = "math_gold_spaced_variable_sum_v3"
 MATH_CANDIDATE_PARSER_VERSION = "math_boxed_final_tail_whitelist_v2"
 MATH_PARSER_VERSION = (
-    "math_gold_last_complete_v2__candidate_math_boxed_final_tail_whitelist_v2"
+    "math_gold_spaced_variable_sum_v3__candidate_math_boxed_final_tail_whitelist_v2"
 )
 MATH_VERIFIER_NAME = "math-verify"
 MATH_CANONICAL_REPRESENTATION_VERSION = "sympy_srepr_v1"
@@ -396,6 +396,21 @@ def _math_verify_gold_parser(boxed_text: str, _state: object) -> object:
         parsing_timeout=None,
         raise_on_error=True,
     )
+    if not parsed:
+        spaced_sum = re.fullmatch(
+            r"\\boxed\{([A-Za-z](?:[ \t]*\+[ \t]*[A-Za-z]){2,})\}",
+            boxed_text,
+        )
+        if spaced_sum is not None:
+            compact = spaced_sum.group(1).replace(" ", "").replace("\t", "")
+            if compact != spaced_sum.group(1):
+                parsed = parse(
+                    rf"\boxed{{{compact}}}",
+                    fallback_mode="no_fallback",
+                    extraction_mode="first_match",
+                    parsing_timeout=None,
+                    raise_on_error=True,
+                )
     if len(parsed) != 1:
         raise _MathParseFailure("gold did not produce exactly one parsed expression")
     return parsed[0]

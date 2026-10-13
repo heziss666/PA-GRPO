@@ -270,6 +270,22 @@ def test_official_gold_uses_last_complete_box_even_when_text_follows(
     )
 
 
+def test_spaced_three_variable_gold_is_verified_against_compact_candidate():
+    from permstudy.data_pipeline.verification import verify_math_question
+
+    gold, verified = verify_math_question(
+        math_question(solution=r"The result is \boxed{a + b + c}."),
+        [candidate("compact_sum", r"\boxed{a+b+c}")],
+        gold_timeout_seconds=3.0,
+        candidate_timeout_seconds=3.0,
+        verification_run_id=VERIFICATION_RUN_ID,
+    )
+
+    assert gold.gold_parse_status == "ok"
+    assert len(verified) == 1
+    assert verified[0].verification_status is VerificationStatus.CORRECT
+
+
 def test_candidate_v2_still_rejects_explanation_after_allowlisted_wrapper():
     from permstudy.data_pipeline.verification import extract_math_candidate
 
@@ -282,13 +298,13 @@ def test_candidate_v2_still_rejects_explanation_after_allowlisted_wrapper():
     )
 
 
-def test_verification_config_binds_combined_gold_v2_candidate_v2_parser_version():
+def test_verification_config_binds_combined_gold_v3_candidate_v2_parser_version():
     from scripts_permstudy.data.verify_candidates import verification_config
 
     config = verification_config("1" * 64, 30.0, 15.0)
 
     assert config["parameters"]["math_parser_version"] == (
-        "math_gold_last_complete_v2__candidate_math_boxed_final_tail_whitelist_v2"
+        "math_gold_spaced_variable_sum_v3__candidate_math_boxed_final_tail_whitelist_v2"
     )
 
 
@@ -369,7 +385,7 @@ def test_math_verify_explicitly_establishes_equivalent_and_non_equivalent_candid
     assert all(record.verifier_name == "math-verify" for record in verified)
     assert all(record.verifier_version == "0.9.0" for record in verified)
     assert all(
-        record.parser_version == "math_gold_last_complete_v2"
+        record.parser_version == "math_gold_spaced_variable_sum_v3"
         "__candidate_math_boxed_final_tail_whitelist_v2"
         for record in verified
     )
