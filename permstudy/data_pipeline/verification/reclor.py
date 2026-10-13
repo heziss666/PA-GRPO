@@ -15,13 +15,17 @@ from ..schema import (
 )
 
 
-RECLOR_PARSER_VERSION = "reclor_final_answer_v1"
+RECLOR_PARSER_VERSION = "reclor_final_answer_terminal_variants_v2"
 RECLOR_VERIFIER_NAME = "reclor_exact_match"
 RECLOR_VERIFIER_VERSION = "reclor_exact_match_v1"
 
 _MARKER = "Final Answer:"
-_VALID_AFTER_MARKER = re.compile(r"Final Answer:[ \t]*([A-D])(?=\s|\Z)")
-_VALID_TERMINAL = re.compile(r"Final Answer:[ \t]*([A-D])\s*\Z")
+_VALID_AFTER_MARKER = re.compile(
+    r"Final Answer:[ \t]*([A-D])(?:[.。](?=\s|\Z)|(?=\s|\Z))"
+)
+_VALID_TERMINAL = re.compile(r"Final Answer:[ \t]*([A-D])[.。]?\s*\Z")
+_BARE_FINAL_LINE = re.compile(r"([A-D])[.。]?")
+_EXPLICIT_FINAL_LINE = re.compile(r"(?i:final[ \t]+answer):[ \t]*([A-D])[.。]?")
 _PARSE_STATUSES = frozenset({"parsed", "invalid", "ambiguous"})
 
 
@@ -43,18 +47,19 @@ class ParsedAnswer:
         if self.status == "parsed":
             if self.answer not in ("A", "B", "C", "D") or self.error_type is not None:
                 raise ValueError("parsed answer must contain one canonical option")
-        elif self.answer is not None or not isinstance(self.error_type, str) or not self.error_type:
+        elif (
+            self.answer is not None
+            or not isinstance(self.error_type, str)
+            or not self.error_type
+        ):
             raise ValueError("unparsed answer must contain one error type")
 
 
 def parse_reclor_candidate(response: str) -> ParsedAnswer:
-    """Parse exactly one case-sensitive terminal ``Final Answer: X`` marker."""
+    """Accept one explicit terminal option, with only observed final punctuation."""
     if not isinstance(response, str):
         raise TypeError("response must be text")
     marker_count = response.count(_MARKER)
-    if marker_count == 0:
-        return ParsedAnswer("invalid", None, "missing_final_marker")
-
     marked_answers = _VALID_AFTER_MARKER.findall(response)
     if marker_count > 1:
         if len(marked_answers) != marker_count:
@@ -63,10 +68,31 @@ def parse_reclor_candidate(response: str) -> ParsedAnswer:
             return ParsedAnswer("ambiguous", None, "conflicting_markers")
         return ParsedAnswer("invalid", None, "duplicate_same_marker")
 
-    terminal = _VALID_TERMINAL.search(response)
-    if terminal is None:
+    terminal = _VALID_TERMINAL.search(response) if marker_count else None
+    if terminal is not None:
+        return ParsedAnswer("parsed", terminal.group(1), None)
+
+    lines = [line.strip() for line in response.splitlines() if line.strip()]
+    final = _BARE_FINAL_LINE.fullmatch(lines[-1]) if lines else None
+    if final is None:
+        reason = "prompt_contract_mismatch" if marker_count else "missing_final_marker"
+        return ParsedAnswer("invalid", None, reason)
+    choice = final.group(1)
+    previous_choices = []
+    for line in lines[:-1]:
+        explicit = _EXPLICIT_FINAL_LINE.fullmatch(line)
+        bare = _BARE_FINAL_LINE.fullmatch(line)
+        if explicit or bare:
+            previous_choices.append((explicit or bare).group(1))
+    if marker_count and len(marked_answers) != marker_count:
         return ParsedAnswer("invalid", None, "prompt_contract_mismatch")
-    return ParsedAnswer("parsed", terminal.group(1), None)
+    if any(previous != choice for previous in previous_choices):
+        return ParsedAnswer("ambiguous", None, "conflicting_markers")
+    if previous_choices:
+        return ParsedAnswer("invalid", None, "duplicate_same_marker")
+    if marker_count:
+        return ParsedAnswer("invalid", None, "prompt_contract_mismatch")
+    return ParsedAnswer("parsed", choice, None)
 
 
 def verify_reclor_question(
@@ -92,12 +118,18 @@ def verify_reclor_question(
             or plan.question_content_hash != question.question_content_hash
             or plan.source is not Source.RECLOR
         ):
-            raise ReClorVerificationError("candidate question identity does not match the ReClor question")
+            raise ReClorVerificationError(
+                "candidate question identity does not match the ReClor question"
+            )
         if plan.key in seen:
             raise ReClorVerificationError("duplicate composite candidate key")
         seen.add(plan.key)
 
-        parsed = parse_reclor_candidate(candidate.response)
+        parsed = (
+            ParsedAnswer("invalid", None, "prompt_contract_mismatch")
+            if candidate.finish_reason == "length"
+            else parse_reclor_candidate(candidate.response)
+        )
         if parsed.status == "parsed":
             status = (
                 VerificationStatus.CORRECT
@@ -156,4 +188,6 @@ def _validate_call(
         or not math.isfinite(verifier_timeout_seconds)
         or verifier_timeout_seconds <= 0
     ):
-        raise ReClorVerificationError("verifier_timeout_seconds must be positive and finite")
+        raise ReClorVerificationError(
+            "verifier_timeout_seconds must be positive and finite"
+        )

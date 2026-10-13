@@ -84,11 +84,16 @@ def candidate(
         ("Final Answer: A\nextra", "invalid", None, "prompt_contract_mismatch"),
         ("Final Answer: A\nFinal Answer: A", "invalid", None, "duplicate_same_marker"),
         ("Final Answer: A\nFinal Answer: B", "ambiguous", None, "conflicting_markers"),
-        ("Final Answer: A\nFinal Answer: E", "invalid", None, "prompt_contract_mismatch"),
+        (
+            "Final Answer: A\nFinal Answer: E",
+            "invalid",
+            None,
+            "prompt_contract_mismatch",
+        ),
         ("answer A", "invalid", None, "missing_final_marker"),
         ("Final Answer: E", "invalid", None, "prompt_contract_mismatch"),
         ("final answer: A", "invalid", None, "missing_final_marker"),
-        ("Final Answer: A.", "invalid", None, "prompt_contract_mismatch"),
+        ("Final Answer: A.", "parsed", "A", None),
     ],
 )
 def test_reclor_terminal_contract(response, status, answer, error_type):
@@ -96,14 +101,67 @@ def test_reclor_terminal_contract(response, status, answer, error_type):
 
     parsed = parse_reclor_candidate(response)
 
-    assert (parsed.status, parsed.answer, parsed.error_type) == (status, answer, error_type)
+    assert (parsed.status, parsed.answer, parsed.error_type) == (
+        status,
+        answer,
+        error_type,
+    )
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ("D.", "D"),
+        ("Reasoning first.\nB", "B"),
+        ("Reasoning first.\nC.", "C"),
+        ("Final Answer: B。", "B"),
+        ("A\nFinal Answer: B", "B"),
+    ],
+)
+def test_reclor_v2_recovers_only_explicit_terminal_option_forms(response, expected):
+    from permstudy.data_pipeline.verification import parse_reclor_candidate
+
+    parsed = parse_reclor_candidate(response)
+
+    assert (parsed.status, parsed.answer, parsed.error_type) == (
+        "parsed",
+        expected,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("response", "status", "reason"),
+    [
+        ("A\nB", "ambiguous", "conflicting_markers"),
+        ("A.\nA", "invalid", "duplicate_same_marker"),
+        ("Final Answer: A\nB", "ambiguous", "conflicting_markers"),
+        ("final answer: A\nB", "ambiguous", "conflicting_markers"),
+        ("Final Answer: A because...", "invalid", "prompt_contract_mismatch"),
+        ("B because...", "invalid", "missing_final_marker"),
+        ("A..", "invalid", "missing_final_marker"),
+        ("Final Answer: A!", "invalid", "prompt_contract_mismatch"),
+    ],
+)
+def test_reclor_v2_rejects_conflicting_or_unapproved_forms(response, status, reason):
+    from permstudy.data_pipeline.verification import parse_reclor_candidate
+
+    parsed = parse_reclor_candidate(response)
+
+    assert (parsed.status, parsed.answer, parsed.error_type) == (
+        status,
+        None,
+        reason,
+    )
 
 
 @pytest.mark.parametrize(
     ("official", "canonical"),
     [(0, "A"), (3, "D"), ("1", "B"), (" c ", "C")],
 )
-def test_official_reclor_labels_canonicalize_without_candidate_text(official, canonical):
+def test_official_reclor_labels_canonicalize_without_candidate_text(
+    official, canonical
+):
     from permstudy.data_pipeline.sources.reclor import canonical_reclor_label
 
     assert canonical_reclor_label(official) == canonical
@@ -143,7 +201,12 @@ def test_verification_uses_official_gold_and_emits_exact_match_records():
         VerificationStatus.INVALID,
         VerificationStatus.AMBIGUOUS,
     ]
-    assert [record.canonical_prediction for record in verified] == ["A", "B", None, None]
+    assert [record.canonical_prediction for record in verified] == [
+        "A",
+        "B",
+        None,
+        None,
+    ]
     assert [record.prediction_parse_status for record in verified] == [
         "parsed",
         "parsed",
@@ -154,12 +217,21 @@ def test_verification_uses_official_gold_and_emits_exact_match_records():
         item.plan.key for item in records
     ]
     assert all(record.verification_run_id == VERIFICATION_RUN_ID for record in verified)
-    assert all(record.original_question_id == gold.original_question_id for record in verified)
+    assert all(
+        record.original_question_id == gold.original_question_id for record in verified
+    )
     assert all(record.source is Source.RECLOR for record in verified)
-    assert [record.generator_id for record in verified] == [item.plan.generator_id for item in records]
+    assert [record.generator_id for record in verified] == [
+        item.plan.generator_id for item in records
+    ]
     assert all(record.verifier_name == "reclor_exact_match" for record in verified)
-    assert all(record.verifier_version == "reclor_exact_match_v1" for record in verified)
-    assert all(record.parser_version == "reclor_final_answer_v1" for record in verified)
+    assert all(
+        record.verifier_version == "reclor_exact_match_v1" for record in verified
+    )
+    assert all(
+        record.parser_version == "reclor_final_answer_terminal_variants_v2"
+        for record in verified
+    )
     assert all(record.verifier_timeout_seconds == 2.5 for record in verified)
     assert [record.error_type for record in verified] == [
         None,
@@ -192,8 +264,14 @@ def test_same_bare_candidate_id_in_different_runs_retains_distinct_composite_ide
         verifier_timeout_seconds=1.0,
     )
 
-    assert (first_verified[0].generation_run_id, first_verified[0].candidate_id) == first.plan.key
-    assert (second_verified[0].generation_run_id, second_verified[0].candidate_id) == second.plan.key
+    assert (
+        first_verified[0].generation_run_id,
+        first_verified[0].candidate_id,
+    ) == first.plan.key
+    assert (
+        second_verified[0].generation_run_id,
+        second_verified[0].candidate_id,
+    ) == second.plan.key
     assert first.plan.key != second.plan.key
 
 
@@ -207,7 +285,10 @@ def test_same_bare_candidate_id_in_different_runs_retains_distinct_composite_ide
     ids=["question-id", "question-hash", "source"],
 )
 def test_verification_rejects_candidate_question_identity_mismatch(changed):
-    from permstudy.data_pipeline.verification import ReClorVerificationError, verify_reclor_question
+    from permstudy.data_pipeline.verification import (
+        ReClorVerificationError,
+        verify_reclor_question,
+    )
 
     record = candidate("candidate_1", "Final Answer: B")
     mismatched = replace(record, plan=replace(record.plan, **changed))
@@ -222,7 +303,10 @@ def test_verification_rejects_candidate_question_identity_mismatch(changed):
 
 
 def test_verification_rejects_duplicate_composite_candidate_keys():
-    from permstudy.data_pipeline.verification import ReClorVerificationError, verify_reclor_question
+    from permstudy.data_pipeline.verification import (
+        ReClorVerificationError,
+        verify_reclor_question,
+    )
 
     record = candidate("candidate_1", "Final Answer: B")
 
@@ -233,3 +317,21 @@ def test_verification_rejects_duplicate_composite_candidate_keys():
             verification_run_id=VERIFICATION_RUN_ID,
             verifier_timeout_seconds=1.0,
         )
+
+
+def test_length_finished_reclor_candidate_stays_invalid_despite_terminal_answer():
+    from permstudy.data_pipeline.verification import verify_reclor_question
+
+    truncated = replace(
+        candidate("truncated", "Final Answer: B"), finish_reason="length"
+    )
+    _, verified = verify_reclor_question(
+        question(),
+        [truncated],
+        verification_run_id=VERIFICATION_RUN_ID,
+        verifier_timeout_seconds=1.0,
+    )
+
+    assert verified[0].verification_status is VerificationStatus.INVALID
+    assert verified[0].canonical_prediction is None
+    assert verified[0].prediction_parse_status == "invalid"
