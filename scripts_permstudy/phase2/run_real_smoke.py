@@ -245,7 +245,7 @@ class NativeVLLMEngine:
             disable_log_stats=True,
         )
         self._engine = vllm_module.LLMEngine.from_engine_args(args)
-        self._tokenizer = self._engine.get_tokenizer()
+        self._tokenizer = self._engine.get_tokenizer_group().get_lora_tokenizer()
 
     def generate(
         self,

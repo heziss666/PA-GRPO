@@ -138,8 +138,8 @@ class ScriptedLowLevelEngine:
         self.pending = []
         self.step_count = 0
 
-    def get_tokenizer(self):
-        return self.tokenizer
+    def get_tokenizer_group(self):
+        return SimpleNamespace(get_lora_tokenizer=lambda: self.tokenizer)
 
     def add_request(self, request_id, prompt, params):
         self.added.append((request_id, prompt, params))
