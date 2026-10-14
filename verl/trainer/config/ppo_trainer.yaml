@@ -69,6 +69,27 @@ grouping:
   # dataset pair IDs plus an explicit rollout slot propagated by the trainer.
   identity_mode: legacy_index
 
+# Controlled pairwise research modes; existing commands retain official behavior.
+permutation_training:
+
+  # official | global_only | eis | alc | pa_controlled (PA-Controlled-NoGate by default).
+  mode: official
+
+  # Numerical stability epsilon, not a sigma gate threshold.
+  eps: 1.0e-6
+
+  # Only pa_controlled adds this consistency reward coefficient.
+  consistency_coef: 1.0
+
+  # First-version comparisons disable the gate because no authoritative delta exists.
+  sigma_gate_enabled: false
+
+  # Must remain null while the gate is disabled.
+  sigma_gate_threshold: null
+
+  # A future explicit gate must record the experiment/source of its threshold.
+  sigma_gate_source: unspecified
+
 # config for the algorithm
 algorithm:
 

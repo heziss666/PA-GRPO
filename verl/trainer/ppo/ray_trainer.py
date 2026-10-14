@@ -43,6 +43,7 @@ from permstudy.rollout_identity import (
     snapshot_rollout_identity,
     validate_generation_identity,
 )
+from permstudy.trainer_advantage import apply_controlled_advantage, validate_controlled_training_config
 from verl import DataProto
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
@@ -253,6 +254,7 @@ def compute_advantage(
     num_repeat: int = 1,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
+    permutation_config=None,
 ) -> DataProto:
     """Compute advantage estimates for policy optimization.
 
@@ -275,6 +277,10 @@ def compute_advantage(
     # Back-compatible with trainers that do not compute response mask in fit
     if "response_mask" not in data.batch.keys():
         data.batch["response_mask"] = compute_response_mask(data)
+    if permutation_config and permutation_config.get("mode", "official") != "official":
+        if getattr(adv_estimator, "value", adv_estimator) != "grpo":
+            raise ValueError("controlled permutation advantage requires GRPO")
+        return apply_controlled_advantage(data, permutation_config)
     # prepare response group
     if adv_estimator == AdvantageEstimator.GAE:
         # Compute advantages and returns using Generalized Advantage Estimation (GAE)
@@ -399,6 +405,7 @@ class RayPPOTrainer:
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
+        validate_controlled_training_config(config)
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
 
@@ -1378,9 +1385,12 @@ class RayPPOTrainer:
                             num_repeat=self.config.actor_rollout_ref.rollout.n,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
+                            permutation_config=self.config.get("permutation_training"),
                         )
                         if batch.meta_info.get("pair_baseline_metrics"):
                             metrics.update(batch.meta_info["pair_baseline_metrics"])
+                        if batch.meta_info.get("controlled_advantage_metrics"):
+                            metrics.update(batch.meta_info["controlled_advantage_metrics"])
 
                     # update critic
                     if self.use_critic:

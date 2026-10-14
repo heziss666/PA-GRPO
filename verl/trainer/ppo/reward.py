@@ -14,6 +14,7 @@
 
 import importlib.util
 import inspect
+import math
 import multiprocessing
 import os
 import sys
@@ -50,6 +51,86 @@ async def _call_with_kwargs_async(raw_fn, extra_kwargs, *args, **kwargs):
     return await raw_fn(*args, **merged_kwargs)
 
 
+def _controlled_reward_kwargs(config: DictConfig, call_kwargs=None) -> Optional[dict[str, Any]]:
+    """Derive the selected controlled method and reject conflicting reward settings."""
+    training_config = config.get("permutation_training") or {}
+    mode = training_config.get("mode", "official")
+    if mode == "official":
+        return None
+    if mode not in {"global_only", "eis", "alc", "pa_controlled"}:
+        raise ValueError(f"unsupported permutation_training.mode: {mode!r}")
+    if (config.get("grouping") or {}).get("identity_mode", "legacy_index") != "explicit":
+        raise ValueError(f"permutation_training.mode={mode} requires grouping.identity_mode=explicit")
+    if config.reward_model.get("reward_manager", "naive") != "batch":
+        raise ValueError(f"permutation_training.mode={mode} requires reward_model.reward_manager=batch")
+
+    custom_config = config.get("custom_reward_function") or {}
+    expected_path = os.path.realpath(os.path.join(os.path.dirname(__file__), "../../../my_reward/judge_qwen.py"))
+    file_path = custom_config.get("path")
+    if not file_path or os.path.normcase(os.path.realpath(file_path)) != os.path.normcase(expected_path):
+        raise ValueError(f"permutation_training.mode={mode} requires custom_reward_function.path={expected_path}")
+    if custom_config.get("name") != "compute_score":
+        raise ValueError(f"permutation_training.mode={mode} requires custom_reward_function.name=compute_score")
+
+    consistency_weight = 0.0
+    if mode == "pa_controlled":
+        consistency_weight = float(training_config.get("consistency_coef", 1.0))
+        if not math.isfinite(consistency_weight) or consistency_weight < 0:
+            raise ValueError("permutation_training.consistency_coef must be finite and nonnegative")
+    inferred = {
+        "identity_mode": "explicit",
+        "evaluation_contract": "controlled",
+        "consistency_weight": consistency_weight,
+    }
+    sources = (
+        ("custom_reward_function.reward_kwargs", custom_config.get("reward_kwargs") or {}),
+        ("reward_model.reward_kwargs", config.reward_model.get("reward_kwargs") or {}),
+        ("reward manager call kwargs", call_kwargs or {}),
+    )
+    for source, supplied in sources:
+        for key, expected in inferred.items():
+            if key in supplied and supplied[key] != expected:
+                raise ValueError(f"{source}.{key} conflicts with permutation_training.mode={mode}: expected {expected!r}")
+        if "return_dict" in supplied and supplied["return_dict"] is not True:
+            raise ValueError(f"{source}.return_dict must be True for controlled reward components")
+    return inferred
+
+
+def _validate_controlled_reward_components(reward_tensor, extra_info):
+    """Require intact row components before the controlled advantage adapter uses them."""
+    if not isinstance(extra_info, dict):
+        raise ValueError("controlled rewards require base_reward and consistency component mappings")
+    rewards = torch.as_tensor(reward_tensor)
+    if rewards.ndim < 1:
+        raise ValueError("controlled reward_tensor must have a row dimension")
+    components = []
+    for key in ("base_reward", "consistency"):
+        if key not in extra_info:
+            raise ValueError(f"controlled rewards require reward_extra_info.{key}")
+        values = torch.as_tensor(extra_info[key], dtype=rewards.dtype, device=rewards.device)
+        if values.shape != (rewards.shape[0],) or not torch.isfinite(values).all():
+            raise ValueError(f"controlled reward_extra_info.{key} must contain one finite value per row")
+        components.append(values)
+    totals = rewards.reshape(rewards.shape[0], -1).sum(dim=-1)
+    if not torch.allclose(totals, components[0] + components[1], atol=1e-6, rtol=1e-6):
+        raise ValueError("controlled reward total must equal base_reward + consistency")
+
+
+def _controlled_batch_scores(raw_fn, *args, **kwargs):
+    """Translate Judge's component dictionary into BatchRewardManager's row format."""
+    kwargs["return_dict"] = True
+    result = raw_fn(*args, **kwargs)
+    rewards = result["reward_tensor"]
+    extra_info = result.get("reward_extra_info", {})
+    _validate_controlled_reward_components(rewards, extra_info)
+    rows = []
+    for position in range(len(rewards)):
+        row = {key: values[position] for key, values in extra_info.items()}
+        row["score"] = float(rewards[position])
+        rows.append(row)
+    return rows
+
+
 def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
     """Load and return a custom reward function from external file.
 
@@ -70,6 +151,7 @@ def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
         AttributeError: If the specified function name isn't found in the module.
     """
 
+    controlled_kwargs = _controlled_reward_kwargs(config)
     reward_fn_config = config.get("custom_reward_function") or {}
     file_path = reward_fn_config.get("path")
     if not file_path:
@@ -79,6 +161,12 @@ def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
     assert function_name is not None
 
     module = sys.modules.get("custom_module", None)
+    if controlled_kwargs is not None and module is not None:
+        # The official loader caches one module globally. A controlled run must
+        # not reuse a previously loaded reward from a different file.
+        module_path = getattr(module, "__file__", "")
+        if os.path.normcase(os.path.realpath(module_path)) != os.path.normcase(os.path.realpath(file_path)):
+            module = None
     if module is None:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Reward function file '{file_path}' not found.")
@@ -100,6 +188,8 @@ def get_custom_reward_fn(config: DictConfig) -> Optional[RawRewardFn]:
     raw_fn = getattr(module, function_name)
 
     reward_kwargs = dict(reward_fn_config.get("reward_kwargs", {}))
+    if controlled_kwargs is not None:
+        reward_kwargs.update(controlled_kwargs)
 
     if not inspect.iscoroutinefunction(raw_fn):
         return partial(_call_with_kwargs, raw_fn, reward_kwargs)
@@ -123,10 +213,16 @@ def load_reward_manager(
         An instance of the specified reward manager class.
     """
 
+    controlled_kwargs = _controlled_reward_kwargs(config, reward_kwargs)
+    if controlled_kwargs is not None:
+        reward_kwargs.update(controlled_kwargs)
+
     # Try to get a custom reward function based on the configuration
     # user defined reward manager can be registered in custom_reward_fn
     compute_score = get_custom_reward_fn(config)
     final_compute_score = compute_score
+    if controlled_kwargs is not None:
+        final_compute_score = partial(_controlled_batch_scores, compute_score)
 
     # The list of pre-defined reward managers are defined in `verl/workers/reward_manager/`:
     # naive: NaiveRewardManager
@@ -176,13 +272,16 @@ def load_reward_manager(
             final_compute_score = default_compute_score
 
     # Instantiate and return the reward manager with the specified parameters
-    return reward_manager_cls(
+    reward_manager = reward_manager_cls(
         tokenizer=tokenizer,
         num_examine=num_examine,
         compute_score=final_compute_score,
         reward_fn_key=config.data.reward_fn_key,
         **reward_kwargs,
     )
+    if controlled_kwargs is not None:
+        reward_manager.require_reward_components = True
+    return reward_manager
 
 
 @tqbridge(put_data=False)
@@ -199,7 +298,11 @@ def compute_reward(data: DataProto, reward_fn: AbstractRewardManager) -> tuple[t
         reward_result = reward_fn(data, return_dict=True)
         reward_tensor = reward_result["reward_tensor"]
         reward_extra_infos_dict = reward_result.get("reward_extra_info", {})
+        if getattr(reward_fn, "require_reward_components", False):
+            _validate_controlled_reward_components(reward_tensor, reward_extra_infos_dict)
     except Exception as e:
+        if getattr(reward_fn, "require_reward_components", False):
+            raise
         print(f"Error in reward_fn: {e}")
         reward_tensor = reward_fn(data)
         reward_extra_infos_dict = {}

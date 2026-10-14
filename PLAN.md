@@ -1,5 +1,7 @@
 # EIS-GRPO × PA-GRPO 统一复现、机制分析与改进项目计划书
 
+> **2026-10-13 已确认执行范围**：第一版采用 Qwen3-8B、共同 PA 基础 Reward，以及 Global-only/EIS/ALC/PA-Controlled-NoGate 四组训练；Base 只评估，sigma gate 关闭。后续范围与职责以 [精简执行方案](PA_GRPO_Task4_Review_Lean_Execution_Plan.md) 为准；下方保留原研究设计。Parser/Verification 由 Data Pipeline 分支维护，Task 4 保持结项。
+
 > 项目定位：LLM 后训练 / GRPO / LLM-as-a-Judge / permutation robustness
 >
 > 建议周期：4 周完成主交付，5–6 周完成双种子与扩展实验

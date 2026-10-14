@@ -1,6 +1,8 @@
 """Pure response-level advantage functions used by fidelity audits."""
 
 from dataclasses import dataclass
+from math import isfinite
+from numbers import Integral
 from typing import Hashable, Sequence
 
 import torch
@@ -13,6 +15,21 @@ class AdvantageResult:
     advantage: torch.Tensor
     group_mean: torch.Tensor
     group_std: torch.Tensor
+    gate_mask: torch.Tensor
+
+
+@dataclass(frozen=True)
+class ControlledAdvantageResult:
+    """Response-level controlled advantage and its ungated diagnostics."""
+
+    advantage: torch.Tensor
+    global_advantage: torch.Tensor
+    local_advantage: torch.Tensor
+    local_weight: torch.Tensor
+    group_mean: torch.Tensor
+    group_std: torch.Tensor
+    local_mean: torch.Tensor
+    local_std: torch.Tensor
     gate_mask: torch.Tensor
 
 
@@ -130,3 +147,115 @@ def global_advantage_official_compatible(
     advantage = torch.clamp((collapsed_returns - means) / stds.clamp_min(1e-6), -clip_value, clip_value)
     gate_mask = torch.zeros_like(rewards_tensor, dtype=torch.bool)
     return AdvantageResult(advantage=advantage, group_mean=means, group_std=stds, gate_mask=gate_mask)
+
+
+def compute_controlled_advantage(
+    rewards: torch.Tensor | Sequence[float],
+    pair_ids: Sequence[Hashable],
+    permutation_ids: Sequence[int],
+    rollout_slots: Sequence[int],
+    *,
+    mode: str,
+    eps: float = 1e-6,
+    sigma_gate_threshold: float | None = None,
+    sigma_gate_source: str | None = None,
+) -> ControlledAdvantageResult:
+    """Compute population-standardized Global, EIS, ALC, or controlled PA.
+
+    Each pair must contain permutations 0 and 1 exactly once for each rollout
+    slot, with slots contiguous from zero. Global statistics use ``pair_id``;
+    local statistics use ``(pair_id, permutation_id)``. EIS adds unit-weight
+    local advantage; ALC weights it by the clipped subgroup-mean gap divided
+    by global sigma plus ``eps``.
+
+    Callers supply base rewards for Global/EIS/ALC and total base-plus-
+    consistency rewards for PA. PA is ungated when no threshold is supplied.
+    An explicit gate requires a positive finite threshold and a nonblank,
+    specified source; only the final advantage is zeroed when global
+    ``sigma < threshold``. There is no response-length weighting or clipping
+    of the resulting advantage.
+    """
+
+    if mode not in ("global_only", "eis", "alc", "pa_controlled"):
+        raise ValueError(f"unsupported controlled advantage mode: {mode!r}")
+    if not isfinite(eps) or eps <= 0:
+        raise ValueError("eps must be positive and finite")
+    if mode == "pa_controlled":
+        if sigma_gate_threshold is not None:
+            if not isfinite(sigma_gate_threshold) or sigma_gate_threshold <= 0:
+                raise ValueError("pa_controlled requires a positive finite sigma_gate_threshold when gated")
+            if (not isinstance(sigma_gate_source, str) or not sigma_gate_source.strip()
+                    or sigma_gate_source.strip().lower() == "unspecified"):
+                raise ValueError("gated pa_controlled requires a nonblank, specified sigma_gate_source")
+    elif sigma_gate_threshold is not None or sigma_gate_source is not None:
+        raise ValueError("sigma gate configuration is only supported for pa_controlled")
+
+    rewards_tensor, pairs = _prepare_inputs(rewards, pair_ids)
+    if not torch.isfinite(rewards_tensor).all():
+        raise ValueError("rewards must be finite")
+    permutations = list(permutation_ids)
+    slots = list(rollout_slots)
+    for name, identities in (("permutation_ids", permutations), ("rollout_slots", slots)):
+        if len(identities) != rewards_tensor.numel():
+            raise ValueError(f"rewards/{name} length mismatch: {rewards_tensor.numel()} != {len(identities)}")
+
+    pair_positions = _positions_by_group(pairs)
+    paired_slots: dict[tuple[Hashable, int], dict[int, int]] = {}
+    slots_by_pair: dict[Hashable, set[int]] = {}
+    for position, (pair_id, permutation_id, slot) in enumerate(zip(pairs, permutations, slots)):
+        if not isinstance(permutation_id, Integral) or permutation_id not in (0, 1):
+            raise ValueError(f"permutation_id at position {position} must be integer 0 or 1")
+        if not isinstance(slot, Integral) or slot < 0:
+            raise ValueError(f"rollout_slot at position {position} must be a non-negative integer")
+        identities = paired_slots.setdefault((pair_id, slot), {})
+        if permutation_id in identities:
+            raise ValueError(f"duplicate rollout identity: {(pair_id, permutation_id, slot)!r}")
+        identities[permutation_id] = position
+        slots_by_pair.setdefault(pair_id, set()).add(slot)
+    for key, identities in paired_slots.items():
+        if set(identities) != {0, 1}:
+            raise ValueError(f"missing permutation for pair/slot identity: {key!r}")
+    for pair_id, pair_slots in slots_by_pair.items():
+        if pair_slots != set(range(len(pair_slots))):
+            raise ValueError(f"rollout slots must be contiguous from zero for pair_id={pair_id!r}")
+
+    group_mean, group_std = _population_stats(rewards_tensor, pairs)
+    local_mean, local_std = _population_stats(rewards_tensor, list(zip(pairs, permutations)))
+    global_advantage = torch.where(
+        group_std == 0, torch.zeros_like(rewards_tensor),
+        (rewards_tensor - group_mean) / (group_std + eps),
+    )
+    local_advantage = torch.where(
+        local_std == 0, torch.zeros_like(rewards_tensor),
+        (rewards_tensor - local_mean) / (local_std + eps),
+    )
+    local_weight = torch.zeros_like(rewards_tensor)
+    if mode == "eis":
+        local_weight.fill_(1.0)
+    elif mode == "alc":
+        for pair_id, positions in pair_positions.items():
+            zero_position, one_position = paired_slots[(pair_id, 0)][0], paired_slots[(pair_id, 0)][1]
+            mean_gap = (local_mean[zero_position] - local_mean[one_position]).abs()
+            weight = torch.where(
+                mean_gap == 0, torch.zeros_like(mean_gap),
+                torch.clamp(mean_gap / (group_std[zero_position] + eps), min=0.0, max=1.0),
+            )
+            index = torch.tensor(positions, device=rewards_tensor.device, dtype=torch.long)
+            local_weight.index_fill_(0, index, weight)
+
+    advantage = global_advantage + local_weight * local_advantage
+    gate_mask = torch.zeros_like(rewards_tensor, dtype=torch.bool)
+    if mode == "pa_controlled" and sigma_gate_threshold is not None:
+        gate_mask = group_std < sigma_gate_threshold
+        advantage = torch.where(gate_mask, torch.zeros_like(advantage), advantage)
+    return ControlledAdvantageResult(
+        advantage=advantage,
+        global_advantage=global_advantage,
+        local_advantage=local_advantage,
+        local_weight=local_weight,
+        group_mean=group_mean,
+        group_std=group_std,
+        local_mean=local_mean,
+        local_std=local_std,
+        gate_mask=gate_mask,
+    )
