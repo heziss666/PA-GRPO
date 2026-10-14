@@ -46,6 +46,13 @@ from permstudy.data_pipeline.verification import (
 
 REQUEST_SEED_VERSION = "candidate_request_seed_sha256_v1"
 PROMPT_TEMPLATE_REVISION = f"phase2_real_candidate_prompt_v1+{REQUEST_SEED_VERSION}"
+LLAMA_RECLOR_PROMPT_REVISION = f"phase2_llama_reclor_prompt_v2+{REQUEST_SEED_VERSION}"
+RECLOR_OUTPUT_RULES = (
+    "\n\nYou may provide reasoning before the final answer.\n"
+    "Your final line MUST be exactly:\nFinal Answer: X\n"
+    "Replace X with one uppercase letter: A, B, C, or D.\n"
+    "Do not output anything after the final answer line."
+)
 
 MATH_SYSTEM_PROMPT = (
     "Solve the mathematics problem carefully. Show your reasoning, then end "
@@ -87,10 +94,14 @@ PAIR_TOKENIZER_REVISION = "a09a35458c702b33eeacc393d103063234e8bc28"
 
 def prompt_contract_hash(
     request_seed_version: str = REQUEST_SEED_VERSION,
+    *,
+    recipe: str = "smoke-v1",
 ) -> str:
     """Hash the exact prompt text together with request-seed semantics."""
     if not isinstance(request_seed_version, str) or not request_seed_version.strip():
         raise ValueError("request_seed_version must be nonempty text")
+    if recipe not in ("smoke-v1", "llama-reclor-prompt-v2"):
+        raise ValueError("unknown generation recipe")
     return sha256_hex(
         canonical_json_bytes(
             {
@@ -100,7 +111,8 @@ def prompt_contract_hash(
                 "reclor_user": (
                     "Context:\n{context}\n\nQuestion:\n{question}\n\n"
                     "A. {answer_a}\nB. {answer_b}\nC. {answer_c}\nD. {answer_d}"
-                ),
+                )
+                + (RECLOR_OUTPUT_RULES if recipe == "llama-reclor-prompt-v2" else ""),
                 "request_seed_version": request_seed_version,
             }
         )
@@ -109,16 +121,22 @@ def prompt_contract_hash(
 
 def build_real_generation_configs(
     split_manifest_hash: str,
+    *,
+    recipe: str = "smoke-v1",
 ) -> tuple[GenerationConfig, ...]:
-    """Build the single approved three-generator smoke recipe."""
+    """Build the original smoke or the small Llama/ReClor prompt diagnostic."""
+    prompt_hash = prompt_contract_hash(recipe=recipe)
+    diagnostic = recipe == "llama-reclor-prompt-v2"
     return tuple(
         GenerationConfig(
             backend="vllm",
             generator_id=generator_id,
             model_repository=repository,
             model_revision=revision,
-            prompt_template_revision=PROMPT_TEMPLATE_REVISION,
-            prompt_template_hash=prompt_contract_hash(),
+            prompt_template_revision=(
+                LLAMA_RECLOR_PROMPT_REVISION if diagnostic else PROMPT_TEMPLATE_REVISION
+            ),
+            prompt_template_hash=prompt_hash,
             temperature=0.8,
             top_p=0.95,
             max_new_tokens=512,
@@ -137,6 +155,7 @@ def build_real_generation_configs(
             batch_size,
             gpu_memory_utilization,
         ) in _REAL_GENERATOR_RECIPE
+        if not diagnostic or generator_id == "llama-3.1-8b-instruct"
     )
 
 
@@ -168,11 +187,23 @@ def request_seed(
     return int(digest[:16], 16) & ((1 << 63) - 1)
 
 
-def render_messages(question: QuestionRecord) -> tuple[dict[str, str], dict[str, str]]:
+def render_messages(
+    question: QuestionRecord,
+    *,
+    prompt_template_revision: str = PROMPT_TEMPLATE_REVISION,
+) -> tuple[dict[str, str], dict[str, str]]:
     """Render the approved source prompt without source gold or solution text."""
     if not isinstance(question, QuestionRecord):
         raise TypeError("question must be a QuestionRecord")
     question.validate()
+    if prompt_template_revision not in (
+        PROMPT_TEMPLATE_REVISION,
+        LLAMA_RECLOR_PROMPT_REVISION,
+    ):
+        raise GenerationConfigurationError("unknown prompt revision")
+    diagnostic = prompt_template_revision == LLAMA_RECLOR_PROMPT_REVISION
+    if diagnostic and question.source is not Source.RECLOR:
+        raise GenerationConfigurationError("Llama prompt diagnostic requires ReClor")
     if question.source is Source.MATH:
         user = question.problem
         system = MATH_SYSTEM_PROMPT
@@ -183,6 +214,8 @@ def render_messages(question: QuestionRecord) -> tuple[dict[str, str], dict[str,
             f"A. {answer_a}\nB. {answer_b}\nC. {answer_c}\nD. {answer_d}"
         )
         system = RECLOR_SYSTEM_PROMPT
+        if diagnostic:
+            user += RECLOR_OUTPUT_RULES
     return ({"role": "system", "content": system}, {"role": "user", "content": user})
 
 
@@ -237,7 +270,11 @@ class NativeVLLMEngine:
                 raise GenerationConfigurationError(
                     "candidate question identity is unavailable"
                 )
-            messages = list(render_messages(question))
+            messages = list(
+                render_messages(
+                    question, prompt_template_revision=config.prompt_template_revision
+                )
+            )
             prompt = self._tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
@@ -458,9 +495,15 @@ def _validate_phase2_config(config: GenerationConfig) -> None:
     config.validate()
     if config.backend != "vllm":
         raise GenerationConfigurationError("Phase 2 requires backend='vllm'")
+    diagnostic = config.prompt_template_revision == LLAMA_RECLOR_PROMPT_REVISION
+    recipe = "llama-reclor-prompt-v2" if diagnostic else "smoke-v1"
     if (
-        config.prompt_template_revision != PROMPT_TEMPLATE_REVISION
-        or config.prompt_template_hash != prompt_contract_hash()
+        (diagnostic and config.generator_id != "llama-3.1-8b-instruct")
+        or (
+            not diagnostic
+            and config.prompt_template_revision != PROMPT_TEMPLATE_REVISION
+        )
+        or config.prompt_template_hash != prompt_contract_hash(recipe=recipe)
     ):
         raise GenerationConfigurationError("Phase 2 prompt contract does not match")
 
@@ -485,8 +528,14 @@ def load_phase2_split(root: Path, manifest: Mapping[str, object]):
 def _generation_plan(
     split_manifest: Mapping[str, object],
     smoke: Sequence,
+    *,
+    recipe: str = "smoke-v1",
 ) -> GenerationPlan:
-    configs = build_real_generation_configs(split_manifest["split_manifest_hash"])
+    configs = build_real_generation_configs(
+        split_manifest["split_manifest_hash"], recipe=recipe
+    )
+    if recipe == "llama-reclor-prompt-v2":
+        smoke = tuple(item for item in smoke if item.source is Source.RECLOR)
     return plan_generation(
         smoke,
         configs,
@@ -559,7 +608,18 @@ def _load_real_generation(
 
     split = io.upstream(root, manifest, "split")
     questions, smoke = split_loader(root, split)
-    plan = _generation_plan(split, smoke)
+    configs = manifest["typed_config"]["parameters"]["generators"]
+    recipe = (
+        "llama-reclor-prompt-v2"
+        if any(
+            item["prompt_template_revision"] == LLAMA_RECLOR_PROMPT_REVISION
+            for item in configs
+        )
+        else "smoke-v1"
+    )
+    plan = _generation_plan(split, smoke, recipe=recipe)
+    if recipe == "llama-reclor-prompt-v2":
+        questions = tuple(item for item in questions if item.source is Source.RECLOR)
     if (
         manifest.get("typed_config")
         != generation_stage_config(
@@ -652,6 +712,9 @@ def build_parser():
         required=True,
     )
     generate.add_argument("--recover-stale-lock", action="store_true")
+    generate.add_argument(
+        "--recipe", choices=("smoke-v1", "llama-reclor-prompt-v2"), default="smoke-v1"
+    )
 
     verify = commands.add_parser("verify")
     io.add_common(verify)
@@ -681,7 +744,11 @@ def _dispatch_generate(
 
     split = io.load_manifest(root, args.split_manifest, "split")
     questions, smoke = split_loader(root, split)
-    plan = _generation_plan(split, smoke)
+    plan = _generation_plan(split, smoke, recipe=args.recipe)
+    if args.recipe == "llama-reclor-prompt-v2":
+        if args.generator_id != "llama-3.1-8b-instruct":
+            raise io.CLIContractError()
+        questions = tuple(item for item in questions if item.source is Source.RECLOR)
     config = generation_stage_config(
         plan.generator_configs,
         samples_per_question=2,

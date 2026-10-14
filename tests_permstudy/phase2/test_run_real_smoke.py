@@ -250,6 +250,38 @@ def test_fixed_real_recipe_builds_only_the_three_approved_vllm_configs():
     )
 
 
+def test_llama_diagnostic_recipe_uses_new_prompt_and_only_reclor_candidates(
+    monkeypatch,
+):
+    from permstudy.data_pipeline.generation import VLLMGenerationBackend
+    from scripts_permstudy.phase2 import run_real_smoke as cli
+
+    questions = tuple(reclor_question(i) for i in range(1, 21)) + tuple(
+        math_question(i) for i in range(21, 41)
+    )
+    assignments = tuple(assignment(item) for item in questions)
+    split = {
+        "split_manifest_hash": SPLIT_HASH,
+        "output_manifest_hash": SPLIT_ENVELOPE_HASH,
+    }
+    old = cli._generation_plan(split, assignments)
+    new = cli._generation_plan(split, assignments, recipe="llama-reclor-prompt-v2")
+    assert len(new.candidates) == 40
+    assert all(item.source is Source.RECLOR for item in new.candidates)
+    assert {item.generator_id for item in new.candidates} == {"llama-3.1-8b-instruct"}
+    assert old.generation_run_id != new.generation_run_id
+    assert {item.candidate_id for item in new.candidates} == {
+        item.candidate_id
+        for item in old.candidates
+        if item.source is Source.RECLOR and item.generator_id == "llama-3.1-8b-instruct"
+    }
+    engine = ScriptedLowLevelEngine(mode="reverse")
+    install_fake_vllm(monkeypatch, fake_vllm_module(engine, []))
+    backend = VLLMGenerationBackend(engine_factory=cli.CachedEngineFactory(questions))
+    backend.generate(new.candidates[:2], new.generator_configs[0])
+    assert all("Your final line MUST be exactly:" in item[1] for item in engine.added)
+
+
 def test_native_adapter_keeps_request_identity_when_engine_finishes_out_of_order(
     monkeypatch,
 ):
@@ -411,8 +443,9 @@ def test_tiny_real_candidate_shape_reaches_existing_verification_pair_and_permut
     assert all(item.pair_id == selected[0].pair_id for item in permutations)
 
 
+@pytest.mark.parametrize("recipe", ["smoke-v1", "llama-reclor-prompt-v2"])
 def test_cli_generate_verify_finalize_writes_one_formal_resumable_chain(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, recipe
 ):
     """Removing the CLI dispatcher must break the only executable P2 path."""
     from permstudy.data_pipeline import splitting
@@ -531,12 +564,19 @@ def test_cli_generate_verify_finalize_writes_one_formal_resumable_chain(
         str(tmp_path),
         "--split-manifest",
         split_path.relative_to(tmp_path).as_posix(),
+        "--recipe",
+        recipe,
     ]
-    for generator_id in (
-        "qwen2.5-7b-instruct",
-        "llama-3.1-8b-instruct",
-        "qwen2.5-32b-instruct",
-    ):
+    generators = (
+        (
+            "qwen2.5-7b-instruct",
+            "llama-3.1-8b-instruct",
+            "qwen2.5-32b-instruct",
+        )
+        if recipe == "smoke-v1"
+        else ("llama-3.1-8b-instruct",)
+    )
+    for generator_id in generators:
         assert (
             cli.main(
                 ["generate", *common, "--generator-id", generator_id],
@@ -553,7 +593,7 @@ def test_cli_generate_verify_finalize_writes_one_formal_resumable_chain(
                 "generate",
                 *common,
                 "--generator-id",
-                "qwen2.5-32b-instruct",
+                generators[-1],
             ],
             split_loader=tiny_split_loader,
             engine_factory_builder=factory_builder,
