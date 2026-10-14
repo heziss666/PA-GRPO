@@ -320,3 +320,47 @@ Phase 2 real smoke is complete only when:
 - an independent review confirms the final gate result.
 
 Completion of this plan may authorize only a proposal for the 200-pair pilot. It never authorizes pilot execution or PA-GRPO training by itself.
+
+## Current research execution scope (2026-10-14)
+
+The researcher's updated instructions supersede the earlier repeated review and
+all-Gates-PASS prerequisites for diagnostic sampling. Preserve the historical
+REAL_SMOKE_FAIL result. The current requirements are reliable final-answer labels,
+same-question correct/incorrect pairs, complete AB/BA identity, and question-level
+Train/Holdout isolation. Statistical Gates continue as diagnostics. A repeated
+full Phase 1 audit or test suite is not a prerequisite for the next experiment.
+
+The original 240 candidates have been reverified. One MATH multiple-choice
+question used an option label as gold and an expression as the candidate answer;
+it is quarantined as unsupported rather than creating a false negative. The
+remaining records form 12 pairs (2 MATH, 10 ReClor) and 24 trainer rows. See
+`artifacts/data_pipeline/phase2/label_check_20261014.json` for sanitized counts and
+hashes. This small dataset is for wiring checks, not a completed 200-pair pilot.
+
+The existing launcher now has a Llama-only diagnostic recipe: the same 20 smoke
+ReClor questions, two samples each, unchanged model revision and decoding, and a
+versioned output-format instruction appended to the user message. It uses the
+same tokenizer chat template and one cached engine. The 40 new candidates have a
+new generation run ID; the original 240 records are preserved.
+
+```bash
+python scripts_permstudy/phase2/run_real_smoke.py generate \
+  --data-root "$PAGRPO_DATA_ROOT" \
+  --split-manifest "$APPROVED_SPLIT_MANIFEST" \
+  --generator-id llama-3.1-8b-instruct \
+  --recipe llama-reclor-prompt-v2
+```
+
+Use the generated manifest with the existing `verify` command. Compare format
+validity to the previous Llama/ReClor 26/40 valid responses, then inspect correct,
+incorrect, and invalid results. Forty samples establish an initial trend only.
+Improvement permits targeted production toward 200 reliable pairs, followed by
+500–1,000 as research needs justify; a completed question is not resampled.
+
+The existing `scripts/run_controlled_pairwise.sh` from `main@c9789fa` supports
+`METHOD=global_only|eis|alc|pa_controlled`. With the pinned Qwen3-8B snapshot and
+the label-checked Parquet, run one step per mode sequentially (`STEPS=1`,
+`TRAIN_BATCH_SIZE=8`, `ROLLOUT_N=2`) after generation releases GPU memory. Check
+storage before each run; keep outputs private. These are wiring checks, not
+four completed research trainings. GPU execution awaits an accessible instance;
+resource usage remains bounded by the previously agreed budget.
