@@ -90,7 +90,7 @@ python -m verl.trainer.main_ppo \
   custom_reward_function.name=compute_score \
   trainer.balance_batch=true trainer.n_gpus_per_node=1 trainer.nnodes=1 \
   trainer.total_epochs="$STEPS" trainer.total_training_steps="$STEPS" \
-  trainer.save_freq="$STEPS" trainer.max_actor_ckpt_to_keep=1 \
+  trainer.save_freq="${SAVE_FREQ:-$STEPS}" trainer.max_actor_ckpt_to_keep=1 \
   trainer.test_freq=-1 trainer.val_before_train=false trainer.resume_mode=disable \
   trainer.logger='["console"]' trainer.project_name=controlled_pairwise \
   trainer.experiment_name="$EXPERIMENT_NAME" trainer.rollout_data_dir=null \
