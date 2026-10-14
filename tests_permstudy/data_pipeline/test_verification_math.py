@@ -286,6 +286,21 @@ def test_spaced_three_variable_gold_is_verified_against_compact_candidate():
     assert verified[0].verification_status is VerificationStatus.CORRECT
 
 
+def test_option_label_gold_is_quarantined_instead_of_creating_false_negative():
+    from permstudy.data_pipeline.verification import verify_math_question
+
+    gold, verified = verify_math_question(
+        math_question(solution=r"The correct option is \boxed{\text{(A)}}."),
+        [candidate("expression_answer", r"\boxed{\frac{1+i\sqrt{11}}{2}}")],
+        gold_timeout_seconds=3.0,
+        candidate_timeout_seconds=3.0,
+        verification_run_id=VERIFICATION_RUN_ID,
+    )
+    assert gold.gold_parse_status == "gold_verification_error"
+    assert gold.error_type == "unsupported_option_label_gold"
+    assert verified == []
+
+
 def test_candidate_v2_still_rejects_explanation_after_allowlisted_wrapper():
     from permstudy.data_pipeline.verification import extract_math_candidate
 
@@ -304,7 +319,7 @@ def test_verification_config_binds_combined_gold_v3_candidate_v2_parser_version(
     config = verification_config("1" * 64, 30.0, 15.0)
 
     assert config["parameters"]["math_parser_version"] == (
-        "math_gold_spaced_variable_sum_v3__candidate_math_boxed_final_tail_whitelist_v2"
+        "math_gold_spaced_sum_option_guard_v3_1__candidate_math_boxed_final_tail_whitelist_v2"
     )
 
 
@@ -385,7 +400,7 @@ def test_math_verify_explicitly_establishes_equivalent_and_non_equivalent_candid
     assert all(record.verifier_name == "math-verify" for record in verified)
     assert all(record.verifier_version == "0.9.0" for record in verified)
     assert all(
-        record.parser_version == "math_gold_spaced_variable_sum_v3"
+        record.parser_version == "math_gold_spaced_sum_option_guard_v3_1"
         "__candidate_math_boxed_final_tail_whitelist_v2"
         for record in verified
     )

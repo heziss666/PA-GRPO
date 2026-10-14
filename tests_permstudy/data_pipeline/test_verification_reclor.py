@@ -156,6 +156,23 @@ def test_reclor_v2_rejects_conflicting_or_unapproved_forms(response, status, rea
 
 
 @pytest.mark.parametrize(
+    ("response", "status", "reason"),
+    [
+        ("final answer: A\nFinal Answer: B", "ambiguous", "conflicting_markers"),
+        ("FINAL ANSWER: A\nFinal Answer: B", "ambiguous", "conflicting_markers"),
+        ("Final Answer: B\nfinal answer: B", "invalid", "duplicate_same_marker"),
+    ],
+)
+def test_conflict_scan_includes_case_variants_of_explicit_final_marker(
+    response, status, reason
+):
+    from permstudy.data_pipeline.verification import parse_reclor_candidate
+
+    parsed = parse_reclor_candidate(response)
+    assert (parsed.status, parsed.answer, parsed.error_type) == (status, None, reason)
+
+
+@pytest.mark.parametrize(
     ("official", "canonical"),
     [(0, "A"), (3, "D"), ("1", "B"), (" c ", "C")],
 )
@@ -229,7 +246,7 @@ def test_verification_uses_official_gold_and_emits_exact_match_records():
         record.verifier_version == "reclor_exact_match_v1" for record in verified
     )
     assert all(
-        record.parser_version == "reclor_final_answer_terminal_variants_v2"
+        record.parser_version == "reclor_terminal_variants_conflict_scan_v2_1"
         for record in verified
     )
     assert all(record.verifier_timeout_seconds == 2.5 for record in verified)

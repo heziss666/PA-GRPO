@@ -15,13 +15,14 @@ from ..schema import (
 )
 
 
-RECLOR_PARSER_VERSION = "reclor_final_answer_terminal_variants_v2"
+RECLOR_PARSER_VERSION = "reclor_terminal_variants_conflict_scan_v2_1"
 RECLOR_VERIFIER_NAME = "reclor_exact_match"
 RECLOR_VERIFIER_VERSION = "reclor_exact_match_v1"
 
 _MARKER = "Final Answer:"
+_ALL_MARKERS = re.compile(r"Final[ \t]+Answer:", re.IGNORECASE)
 _VALID_AFTER_MARKER = re.compile(
-    r"Final Answer:[ \t]*([A-D])(?:[.。](?=\s|\Z)|(?=\s|\Z))"
+    r"(?i:Final[ \t]+Answer):[ \t]*([A-D])(?:[.。](?=\s|\Z)|(?=\s|\Z))"
 )
 _VALID_TERMINAL = re.compile(r"Final Answer:[ \t]*([A-D])[.。]?\s*\Z")
 _BARE_FINAL_LINE = re.compile(r"([A-D])[.。]?")
@@ -60,9 +61,10 @@ def parse_reclor_candidate(response: str) -> ParsedAnswer:
     if not isinstance(response, str):
         raise TypeError("response must be text")
     marker_count = response.count(_MARKER)
+    all_marker_count = len(_ALL_MARKERS.findall(response))
     marked_answers = _VALID_AFTER_MARKER.findall(response)
-    if marker_count > 1:
-        if len(marked_answers) != marker_count:
+    if all_marker_count > 1:
+        if len(marked_answers) != all_marker_count:
             return ParsedAnswer("invalid", None, "prompt_contract_mismatch")
         if len(set(marked_answers)) > 1:
             return ParsedAnswer("ambiguous", None, "conflicting_markers")

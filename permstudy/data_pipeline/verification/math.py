@@ -21,11 +21,9 @@ from ..schema import (
 
 
 MATH_VERIFY_VERSION = "0.9.0"
-MATH_GOLD_PARSER_VERSION = "math_gold_spaced_variable_sum_v3"
+MATH_GOLD_PARSER_VERSION = "math_gold_spaced_sum_option_guard_v3_1"
 MATH_CANDIDATE_PARSER_VERSION = "math_boxed_final_tail_whitelist_v2"
-MATH_PARSER_VERSION = (
-    "math_gold_spaced_variable_sum_v3__candidate_math_boxed_final_tail_whitelist_v2"
-)
+MATH_PARSER_VERSION = "math_gold_spaced_sum_option_guard_v3_1__candidate_math_boxed_final_tail_whitelist_v2"
 MATH_VERIFIER_NAME = "math-verify"
 MATH_CANONICAL_REPRESENTATION_VERSION = "sympy_srepr_v1"
 
@@ -140,6 +138,11 @@ def verify_math_question(
     gold_box = extract_math_gold(question.solution)
     if gold_box.status != "parsed":
         return _gold_error(question, verification_run_id, "gold_parse_failure"), []
+    # An option label can parse as a variable, but is not the option's expression.
+    if re.fullmatch(r"\\boxed\{\\text\{\([A-Z]\)\}\}", gold_box.boxed_text):
+        return _gold_error(
+            question, verification_run_id, "unsupported_option_label_gold"
+        ), []
 
     gold_hook = gold_parser_hook or _math_verify_gold_parser
     candidate_hook = candidate_verifier_hook or _math_verify_candidate_verifier
