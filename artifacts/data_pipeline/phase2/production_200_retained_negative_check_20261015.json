@@ -1,0 +1,40 @@
+{
+  "schema_version": "phase2_retained_negative_check_v1",
+  "git_sha": "ea9e58b60ce5720047200e725bdd1c3561b28657",
+  "platform": "Windows_CPU",
+  "phase_status": "RETAINED_NEGATIVE_LABELS_CHECKED_TRAINING_HOLD",
+  "real_generation_performed": false,
+  "split_manifest_hash": "94f6dabb281daf22723c3797244c17a9c8fd520a1688c0f509e5d2c5fd1a3bde",
+  "run_ids": {
+    "math_generation": "9c995c952f206966a6709c74a70be5482eeb8e4f56dca2c0ad114b39de6e87f9",
+    "math_verification": "3a62f4b433485119811697d21ebb628b57d8c8bb1ffb0a0bcea8c366894acaaa",
+    "reclor_generation": "a4831878b7adff3ca070b8b80c6f2f5ea1229022918d1d4c8221cc54f6a248e9",
+    "reclor_verification": "86a8fe1db635aed3ffc23f01b740f070810df8f3d204e3e8efa33ee6e6276cca"
+  },
+  "pair_count": 105,
+  "permutation_count": 210,
+  "completion_counts": {
+    "math": {"equivalence_checked_negatives": 36, "new_false_incorrect": 0, "new_holds": 0, "candidate_pairs": 36, "structural_permutations": 72},
+    "reclor": {"identity_label_checked_negatives": 69, "new_false_incorrect": 0, "new_holds": 0, "candidate_pairs": 69, "structural_permutations": 138},
+    "candidate_pairs": 105, "structural_permutations": 210,
+    "cross_source_identity_duplicates": 0, "holdout_overlap": 0,
+    "prior_blocked_pairs_unchanged": 38, "prior_unsure_pairs_unchanged": 9,
+    "pipeline_files_unchanged": 857,
+    "human_signoffs": 0, "formal_audit_completed": 0,
+    "gate_evaluations": 0, "trainer_exports": 0, "training_steps": 0,
+    "new_gpu_runs": 0, "parser_changes": 0
+  },
+  "artifact_hashes": {
+    "prior_math_positive_screen": "d371813e1eea5b58d3aac4a11e396fbe45e58c80807238a719223e547ac8eb6f",
+    "prior_reclor_positive_screen": "7e5f0d9fda0b7f14c21f32816ef3796f7109c98188bb8701bea175e9fafc19ec",
+    "math_negative_check": "3ee8e0e986f12242c07c683ff0856a546298233308bd1375ec1ab898d53d45b4",
+    "reclor_negative_check": "f26ff8db7d2c59851094931b55940dbf50232f6789e20510c179360a34d45200",
+    "math_pair_view": "747d956dbddba40b876226499010a107719771333cfaaca772632be1f033d811",
+    "reclor_pair_view": "a09c50f27f360211aee72877d28ebfe26e48ac66b6f3d81c6c259017a3607d11",
+    "math_permutation_view": "c7f11b29ee047f000cb047c9c046941d93fd516eca863e4bc0352f74eda44653",
+    "reclor_permutation_view": "df24c86a5e71beda016153724bc99509e9b2207bf4cdb3cf4178e28ab4f017a1",
+    "math_permutation_semantics": "1e20b794e11b5945a0b568d6da652dc900b8e5e403d7351f064ee1affb2e9c48",
+    "reclor_permutation_semantics": "374b169a670562fc44d521f2e8c7f6d0ee715731e21671535255817efe8744ae",
+    "private_check_backup": "3f54b5bc1db619e355a61f8da493d0e9eea1e4fcc03fec40ca243907b0c82eef"
+  }
+}
