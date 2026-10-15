@@ -6,6 +6,11 @@ new candidate generation or parser relaxation. Historical Qwen3 Task 4 evidence
 and the original Verification labels remain unchanged. Latest source baseline:
 `d20005eb86a65c72470fa7c92db31184ffccd5b2`.
 
+Execution completed on 2026-10-15 at code `5bfb079`: 3360/3360 real Judge
+rollouts, no training, verified private backup and shutdown requested. See the
+[measured results](../../artifacts/data_pipeline/phase2/qwen25_judge_subgroups_20261015.md).
+This does not release the retained pairs for training or authorize a main merge.
+
 ## Fixed experiment
 
 - Qwen/Qwen2.5-7B-Instruct and tokenizer revision
