@@ -10,7 +10,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Reward function for the pairwise Judge task with Qwen3 models.
+"""Pairwise Judge reward shared by controlled Qwen2.5 and historical Qwen3 runs.
 
 Identical pairwise consistency logic to ``judge_llama.py`` (Eq. 8); differs in
 the chain-of-thought tag (``<thinking>`` vs ``<think>``) and uses a richer
@@ -127,6 +127,36 @@ def extract_think_content(text):
             return text[start + 7:end].strip()  
     
     return None
+
+
+def _base_components(text, ground_truth, answer):
+    """The original PA component rules, independent of model family or logging."""
+    if ground_truth is None:
+        return 0.0, 0.0, 0.0
+    correctness = 1.0 if answer == ground_truth else -1.0
+    formatting = 0.3 if "<answer>" in text and "</answer>" in text else -0.3
+    content = extract_think_content(text)
+    length = len(content) if content is not None else 0
+    if length < 500:
+        length_reward = -0.1
+    elif length < 2000:
+        length_reward = 0.1
+    elif length <= 3500:
+        length_reward = 0.2
+    elif length <= 5000:
+        length_reward = 0.1
+    else:
+        length_reward = -0.1
+    return correctness, formatting, length_reward
+
+
+def controlled_base_reward(text, ground_truth):
+    """Exactly the controlled base reward, without logs, consistency or GPU work."""
+    text = text if isinstance(text, str) else ""
+    answer = extract_controlled_answer(text, mode="thinking", num_options=2)
+    correctness, formatting, length = _base_components(text, ground_truth, answer)
+    return {"answer": answer, "correctness": correctness, "format": formatting,
+            "length": length, "base_reward": correctness + formatting + length}
 
 
 def safe_log(index, pid, cuda, txt):
@@ -275,33 +305,8 @@ def compute_score(
         extraction_methods[i] = method
         confidence_list.append(confidence)
 
-        if gt is None:
-            base_score = 0.0
-            score_corr = 0.0
-            bonus_format = 0.0
-            length_reward = 0.0
-        else:
-            score_corr = 1.0 if ans == gt else -1.0
-
-            bonus_format = 0.3 if "<answer>" in sol and "</answer>" in sol else -0.3
-
-            think_content = extract_think_content(sol)
-            if think_content is not None:
-                think_len = len(think_content)
-                if think_len < 500:
-                    length_reward = -0.1      
-                elif think_len < 2000:
-                    length_reward = 0.1      
-                elif think_len <= 3500:
-                    length_reward = 0.2     
-                elif think_len <= 5000:
-                    length_reward = 0.1       
-                else:
-                    length_reward = -0.1    
-            else:
-                length_reward = -0.1
-
-            base_score = score_corr + bonus_format + length_reward
+        score_corr, bonus_format, length_reward = _base_components(sol, gt, ans)
+        base_score = score_corr + bonus_format + length_reward
 
         scores[i] = float(base_score)
         base_scores[i] = float(base_score)

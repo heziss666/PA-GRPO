@@ -2,7 +2,7 @@
 # Short controlled wiring run; formal runs use the data pipeline's paired parquet.
 set -euo pipefail
 
-: "${MODEL_PATH:?MODEL_PATH is required (the pinned Qwen3-8B snapshot)}"
+: "${MODEL_PATH:?MODEL_PATH is required (Qwen2.5-7B-Instruct snapshot a09a35458c702b33eeacc393d103063234e8bc28)}"
 : "${TRAIN_DATASET:?TRAIN_DATASET is required (complete, contiguous AB/BA rows)}"
 : "${RUN_DIR:?RUN_DIR is required (private output directory)}"
 METHOD="${METHOD:-global_only}"
@@ -32,6 +32,10 @@ from pathlib import Path
 import shutil
 import sys
 import torch
+import json
+model = Path(__import__('os').environ['MODEL_PATH']).resolve()
+if model.name != 'a09a35458c702b33eeacc393d103063234e8bc28' or json.loads((model / 'config.json').read_text())['model_type'] != 'qwen2':
+    raise SystemExit('controlled first-version backbone must be the pinned Qwen2.5-7B-Instruct snapshot')
 target = Path(sys.argv[1]).expanduser().resolve()
 probe = target.parent
 while not probe.exists():

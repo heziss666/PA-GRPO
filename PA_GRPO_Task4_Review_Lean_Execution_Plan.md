@@ -149,7 +149,7 @@ A_{\mathrm{ALC}}=A_g+\lambda_{\mathrm{local}}A_l,\qquad
 
 ### 5.3 训练策略
 
-- **Judge backbone 已确定为 Qwen3-8B**（项目负责人确认）。四组和 Base 使用 `Qwen/Qwen3-8B@b968826d9c46dd6066d109eabc6255188de91218`，复用 Task 4 已验证环境；各方法不得换模型或 revision。
+- **2026-10-15 Judge backbone 修订为 Qwen2.5-7B-Instruct**（项目负责人确认）。四组和 Base 统一使用 `Qwen/Qwen2.5-7B-Instruct@a09a35458c702b33eeacc393d103063234e8bc28` 和同 revision tokenizer；各方法不得换模型或 revision。历史 Task 4 的 Qwen3-8B 成功记录仅作为历史证据，不是 Qwen2.5 的训练验证。先进行 [AB/BA 子组诊断](docs/experiments/2026-10-15-qwen25-subgroup-diagnostic.md)，本次不训练。
 - 先从 **200 Pair Pilot** 测吞吐量、显存和有无训练信号，再扩展到 500～1,000 有效 Pair；如数据/预算允许再扩大。Pilot 的目的不是单独制作新 Evidence，而是快速排除阻塞。
 - 四组方法统一数据、Seed、Batch/LoRA、生成温度、Rollout 数、步数/Token Budget 和评估协议；初版一个训练 Seed，保留最小可复现记录。
 - 保留 Task 4 已知有用的 CPU Offload 和显存参数，视新数据长度做必要调整。训练前检查磁盘空间；训练时只保留故障恢复所需最近 Checkpoint，最终保留实际可加载的 LoRA Adapter（及必要 config）。
@@ -163,7 +163,7 @@ A_{\mathrm{ALC}}=A_g+\lambda_{\mathrm{local}}A_l,\qquad
 
 ```bash
 METHOD=alc \
-MODEL_PATH=/private/path/to/pinned-Qwen3-8B \
+MODEL_PATH=/private/cache/snapshots/a09a35458c702b33eeacc393d103063234e8bc28 \
 TRAIN_DATASET=/private/path/to/complete-pairwise.parquet \
 RUN_DIR=/private/path/to/new-alc-run \
 bash scripts/run_controlled_pairwise.sh
@@ -240,7 +240,7 @@ bash scripts/run_controlled_pairwise.sh
 
 ## 10. 给主进程 / Codex 的执行指令（可直接引用）
 
-> 执行已确认的最小科研闭环。Task 4 结项；Parser v2 不重复开发，原 240 条候选不重新生成。Data Pipeline 负责复验、解决标签问题、扩量与真实 MATH/ReClor Parquet。主线复用 PA 基础 Reward 和既有 controlled Judge parser，接入 Global-only/EIS/ALC/PA-Controlled-NoGate；PA 添加 Consistency，四组均关闭 sigma gate，delta 保持 null/unspecified。不为 delta 新增实验。统一 Qwen3-8B backbone、数据、预算和评估，先用已有 Pairwise 数据检查接线，随后跑正式四组与 Base 评估。只新增公式/身份/数值/更新/数据隔离所需检查，不新增完整 Review/Evidence/Gate 链。真实阻塞定点修复；尚未执行的实验不能写成完成。
+> 执行已确认的最小科研闭环。Task 4 结项；Parser v2 不重复开发，原 240 条候选不重新生成。Data Pipeline 负责复验、解决标签问题、扩量与真实 MATH/ReClor Parquet。主线复用 PA 基础 Reward 和既有 controlled Judge parser，接入 Global-only/EIS/ALC/PA-Controlled-NoGate；PA 添加 Consistency，四组均关闭 sigma gate，delta 保持 null/unspecified。不为 delta 新增实验。第一版统一 pinned Qwen2.5-7B-Instruct backbone、tokenizer、数据、预算和评估；历史 Qwen3 Task 4 保留，不等价于新主模型完成训练验证。当前先完成 105 Pair 未训练 Judge 的 AB/BA N8/N16 诊断，不训练、不更新权重。只新增必要接口与少量数值检查，不新增完整 Review/Evidence/Gate 链。真实阻塞定点修复；尚未执行的实验不能写成完成。
 
 ---
 

@@ -74,9 +74,25 @@ DATASET_DIR = os.environ.get("PAGRPO_DATASET_DIR", _DEFAULT_DATASET_DIR)
 def detect_model_type(model_path):
     """自动检测模型类型"""
     model_path_lower = model_path.lower()
+    config_path = Path(model_path) / "config.json"
+    if config_path.is_file():
+        with config_path.open(encoding="utf-8") as stream:
+            family = json.load(stream).get("model_type")
+        if family in {"qwen2", "qwen3"}:
+            return family
+    if "qwen2" in model_path_lower:
+        return "qwen2"
     if "qwen" in model_path_lower:
         return "qwen3"
     return "llama"
+
+
+def render_chat_prompt(tokenizer, messages, model_type):
+    """Only Qwen3 has the enable_thinking switch; Qwen2 uses its native template."""
+    kwargs = {"tokenize": False, "add_generation_prompt": True}
+    if model_type == "qwen3":
+        kwargs["enable_thinking"] = False
+    return tokenizer.apply_chat_template(messages, **kwargs)
 
 
 def detect_checkpoint_type(checkpoint_path):
@@ -561,14 +577,7 @@ class VLLMModelWrapper:
         # 转换为文本prompts
         text_prompts = []
         for messages in prompts_list:
-            if self.model_type == "qwen3":
-                text = self.tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
-                )
-            else:
-                text = self.tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
-                )
+            text = render_chat_prompt(self.tokenizer, messages, self.model_type)
             text_prompts.append(text)
         
         # 请求更多的logprobs以覆盖所有答案选项（设置为20以增加覆盖率）
@@ -752,14 +761,7 @@ class TransformersModelWrapper:
         return answer_probs
     
     def generate(self, messages, mode="direct", max_new_tokens=2048, temperature=0.0, top_p=1.0, num_options=4):
-        if self.model_type == "qwen3":
-            text = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
-            )
-        else:
-            text = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
+        text = render_chat_prompt(self.tokenizer, messages, self.model_type)
 
         inputs = self.tokenizer(text, return_tensors="pt", padding=True).to(self.model.device)
 
@@ -927,7 +929,7 @@ def build_argument_parser():
                         help="Path to the model to evaluate (a base HF model, LoRA checkpoint, or merged HF model).")
     parser.add_argument("--base_model_path", type=str, default=None, 
                         help="Base model path; required when --model_path points at a LoRA checkpoint.")
-    parser.add_argument("--model_type", type=str, choices=["llama", "qwen3", "auto"], default="auto")
+    parser.add_argument("--model_type", type=str, choices=["llama", "qwen2", "qwen3", "auto"], default="auto")
     
     # 批量checkpoint评估
     parser.add_argument("--checkpoint_dir", type=str, default=None, 

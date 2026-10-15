@@ -1,6 +1,6 @@
 # EIS-GRPO × PA-GRPO 统一复现、机制分析与改进项目计划书
 
-> **2026-10-13 已确认执行范围**：第一版采用 Qwen3-8B、共同 PA 基础 Reward，以及 Global-only/EIS/ALC/PA-Controlled-NoGate 四组训练；Base 只评估，sigma gate 关闭。后续范围与职责以 [精简执行方案](PA_GRPO_Task4_Review_Lean_Execution_Plan.md) 为准；下方保留原研究设计。Parser/Verification 由 Data Pipeline 分支维护，Task 4 保持结项。
+> **2026-10-15 主模型修订**：第一版统一采用 `Qwen/Qwen2.5-7B-Instruct@a09a35458c702b33eeacc393d103063234e8bc28`（含同 revision tokenizer）、共同 PA 基础 Reward，以及 Global-only/EIS/ALC/PA-Controlled-NoGate 四组训练；Base 只评估，sigma gate 关闭。历史 Qwen3-8B Task 4 Smoke 证据不变，不代表新主模型已通过训练验证。职责以 [精简执行方案](PA_GRPO_Task4_Review_Lean_Execution_Plan.md) 为准；当前先执行 [105 Pair AB/BA 推理诊断](docs/experiments/2026-10-15-qwen25-subgroup-diagnostic.md)，不训练、不放行数据。
 
 > 项目定位：LLM 后训练 / GRPO / LLM-as-a-Judge / permutation robustness
 >
