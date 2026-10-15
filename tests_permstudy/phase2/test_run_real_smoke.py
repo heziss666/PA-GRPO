@@ -310,7 +310,7 @@ def math_completion_fixture():
     return questions, split
 
 
-def test_math_recipe_plans_68_requests_and_renders_concise_prompt_without_gold(
+def test_math_recipe_plans_108_requests_and_renders_concise_prompt_without_gold(
     monkeypatch,
 ):
     """Wrong source/model/length or dropped selection binding must fail here."""
@@ -322,8 +322,8 @@ def test_math_recipe_plans_68_requests_and_renders_concise_prompt_without_gold(
     assignments = tuple(assignment(q) for q in questions)
     old = cli._generation_plan(split, assignments)
     plan = cli._generation_plan(split, assignments, recipe="math-completion-v2")
-    assert len(plan.candidates) == 68
-    assert len({c.original_question_id for c in plan.candidates}) == 17
+    assert len(plan.candidates) == 108
+    assert len({c.original_question_id for c in plan.candidates}) == 27
     assert all(c.source is Source.MATH for c in plan.candidates)
     assert {c.generator_id for c in plan.candidates} == {
         "qwen2.5-7b-instruct",
@@ -397,7 +397,7 @@ def test_math_recipe_rejects_incomplete_or_different_approved_question_pool(corr
 def test_math_recipe_cli_generation_reloads_exact_selected_artifacts(
     monkeypatch, tmp_path
 ):
-    """Both model commands and the downstream loader must agree on 17 questions."""
+    """Both model commands and the downstream loader must agree on 27 questions."""
     from permstudy.data_pipeline.generation import GenerationConfigurationError
     from scripts_permstudy.data import _common as io
     from scripts_permstudy.phase2 import run_real_smoke as cli
@@ -428,13 +428,13 @@ def test_math_recipe_cli_generation_reloads_exact_selected_artifacts(
     for generator in ("qwen2.5-7b-instruct", "llama-3.1-8b-instruct"):
         args = parser.parse_args([*base, "--generator-id", generator])
         result = cli.dispatch(args, tmp_path, split_loader=loader)
-    assert result["count"] == 68
+    assert result["count"] == 108
     persisted = io.read_json(tmp_path / f"generation/{result['run_id']}/manifest.json")
     _, plan, loaded_questions, candidates = cli._load_real_generation(
         tmp_path, persisted, loader
     )
-    assert len(plan.candidates) == len(candidates) == 68
-    assert len(loaded_questions) == 17
+    assert len(plan.candidates) == len(candidates) == 108
+    assert len(loaded_questions) == 27
     assert all(q.source is Source.MATH for q in loaded_questions)
     with pytest.raises(io.CLIContractError):
         cli.dispatch(
@@ -446,6 +446,75 @@ def test_math_recipe_cli_generation_reloads_exact_selected_artifacts(
         cli._load_real_generation(
             tmp_path, persisted, lambda root, manifest: (questions, assignments[1:])
         )
+
+
+def test_math_recipe_loads_fresh_training_questions_outside_original_smoke(
+    monkeypatch,
+    tmp_path,
+):
+    from dataclasses import replace
+    from scripts_permstudy.data import _common as io
+    from scripts_permstudy.data import plan_generation as phase1
+    from scripts_permstudy.phase2 import run_real_smoke as cli
+
+    questions, split = math_completion_fixture()
+    assignments = tuple(assignment(q) for q in questions)
+    original_smoke = tuple(
+        a
+        for a in assignments
+        if a.original_question_id not in cli.MATH_COMPLETION_NEW_IDS
+    )
+    monkeypatch.setattr(
+        phase1,
+        "load_split",
+        lambda *args: (SimpleNamespace(assignments=assignments), original_smoke),
+    )
+    monkeypatch.setattr(io, "records", lambda *args: list(questions))
+    selected, selected_assignments = cli.load_phase2_split(
+        tmp_path, split, recipe="math-completion-v2"
+    )
+    plan = cli._generation_plan(
+        split, selected_assignments, recipe="math-completion-v2"
+    )
+    assert len(selected) == 27
+    assert (
+        sum(
+            c.original_question_id in cli.MATH_COMPLETION_RETEST_IDS
+            for c in plan.candidates
+        )
+        == 68
+    )
+    assert (
+        sum(
+            c.original_question_id in cli.MATH_COMPLETION_NEW_IDS
+            for c in plan.candidates
+        )
+        == 40
+    )
+    assert len(set(cli.MATH_COMPLETION_NEW_IDS)) == 10
+    assert set(cli.MATH_COMPLETION_NEW_IDS).isdisjoint(
+        a.original_question_id for a in original_smoke
+    )
+    changed = tuple(
+        replace(a, split=Split.INTERNAL_HOLDOUT)
+        if a.original_question_id in cli.MATH_COMPLETION_NEW_IDS
+        else a
+        for a in assignments
+    )
+    monkeypatch.setattr(
+        phase1,
+        "load_split",
+        lambda *args: (SimpleNamespace(assignments=changed), original_smoke),
+    )
+    with pytest.raises(io.IntegrityError):
+        cli.load_phase2_split(tmp_path, split, recipe="math-completion-v2")
+    monkeypatch.setattr(
+        phase1,
+        "load_split",
+        lambda *args: (SimpleNamespace(assignments=assignments), assignments),
+    )
+    with pytest.raises(io.IntegrityError):
+        cli.load_phase2_split(tmp_path, split, recipe="math-completion-v2")
 
 
 def test_native_adapter_keeps_request_identity_when_engine_finishes_out_of_order(

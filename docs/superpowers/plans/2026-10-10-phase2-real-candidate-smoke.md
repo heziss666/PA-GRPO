@@ -377,27 +377,44 @@ to the 17 unpaired questions gives 54/102. These raw finish-reason counts justif
 testing 1024 output tokens; they are not the older invalid-reason category count.
 
 The existing launcher now accepts `--recipe math-completion-v2`: the approved
-17 unpaired MATH training questions, Qwen2.5-7B and Llama-3.1-8B, two samples
-each (34 per model, 68 total). Temperature 0.8, top-p 0.95, pinned model revisions,
+17 unpaired MATH training questions plus ten previously unused training questions,
+Qwen2.5-7B and Llama-3.1-8B, two samples each (54 per model, 108 total).
+Temperature 0.8, top-p 0.95, pinned model revisions,
 seed and runtime parameters remain unchanged. Only output length (1024) and the
 versioned concise-reasoning/terminal-boxed instruction change. The exact target
-IDs participate in the prompt-contract hash, and the recipe requires the
+IDs and the old/new cohort membership participate in the prompt-contract hash, and the recipe requires the
 approved split. This keeps the existing frozen GenerationConfig schema intact.
 
-CPU preflight plans run
-`11d1c7a62aacea8879801a159d8693c712b2a4eb80885d8fe4fd8c653b1e1d5a`.
+The ten fresh questions are selected from 6,730 eligible non-smoke MATH training
+questions, without examining candidate outcomes. Rank by SHA256 of UTF-8
+`math_completion_fresh_v1|42|<original_question_id>` (ID breaks ties), select the
+first question in each alphabetically ordered category, then scan the ranked
+pool for distinct category/level cells until exactly ten are selected. The frozen
+IDs cover seven categories and Levels 1-5. CPU gold-only verification passed
+10/10 under the existing verifier; it does not certify future candidate labels.
+The runtime loader reads the full immutable split, not only its original smoke
+subset, and rejects fresh IDs found in smoke or holdout.
+
+CPU preflight now plans run
+`34d2703c30f1b1bd5b0b0413d85167559f415fb6d779a290602c14898a2cc848`.
+This supersedes the unexecuted 68-candidate plan
+`11d1c7a62aacea8879801a159d8693c712b2a4eb80885d8fe4fd8c653b1e1d5a`;
+its original receipt remains historical and is not overwritten.
 It does not generate candidates. After separate GPU execution confirmation,
 run the existing `generate` command twice, first with
 `--generator-id qwen2.5-7b-instruct --recipe math-completion-v2`, then in a new
 process with `--generator-id llama-3.1-8b-instruct --recipe math-completion-v2`,
 using the same approved split reference and external data root. No 32B run is
-part of this recipe. The maximum output budget is 69,632 tokens; GPU price and
+part of this recipe. The maximum output budget is 110,592 tokens; GPU price and
 available hardware must be confirmed before any paid execution.
 
 Reuse existing verification, audit, pair selection, and export functions. Keep
 old and new runs separate; do not pair an old-run correct response with a new-run
 incorrect response. Judge the diagnostic by truncation, validity, binary labels,
-and newly covered independent questions. Do not rerun the full Phase 1 suite or
+and newly covered independent questions, separately for the 17-question retest
+and ten-question fresh cohort (68 and 40 planned candidates). Do not pool these
+two rates or imply that extra candidates are extra independent questions.
+Do not rerun the full Phase 1 suite or
 require the three-model Statistical Gate to pass for this restricted diagnosis.
 Move to new MATH questions after this bounded probe instead of repeatedly
 resampling the original smoke. Pilot and training are not authorized here.

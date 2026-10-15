@@ -63,7 +63,7 @@ MATH_COMPLETION_SYSTEM_PROMPT = (
 MATH_COMPLETION_SPLIT_HASH = (
     "94f6dabb281daf22723c3797244c17a9c8fd520a1688c0f509e5d2c5fd1a3bde"
 )
-MATH_COMPLETION_TARGET_IDS = (
+MATH_COMPLETION_RETEST_IDS = (
     "math:train:1bf2b23575c2e412cf0149305f47a340eb55d155",
     "math:train:3266eb2e025c6866e8c4e30070a6a26f367ee025",
     "math:train:5cf253158c853c357b77f208519c159106940b5c",
@@ -82,6 +82,21 @@ MATH_COMPLETION_TARGET_IDS = (
     "math:train:f706f439c308876702e1871c4ee566718739510b",
     "math:train:ff91a3878a8b7f2af8c626f7a5b8ecc13c76c5d1",
 )
+# Seed-42 selection outside the original smoke: one per category, then
+# additional distinct category/level cells by stable SHA256 rank.
+MATH_COMPLETION_NEW_IDS = (
+    "math:train:127f3a8c152fb51fc2a2dc2eb7df360a78a64742",
+    "math:train:239b6cb99dc7a40ab9b018d0482269a707a848a7",
+    "math:train:2c02d04046ce7e74a9b291b79295cfb4584092d7",
+    "math:train:493954c39f42acda9726cac2338021679550cedb",
+    "math:train:6646fe2099094014c0b1b1c25fb3f53495fc9d46",
+    "math:train:69a6f35ed6074d78ee273b21a4c63a8585910dee",
+    "math:train:96257624c9a0d569e4ec491f2b1327be839c6613",
+    "math:train:be5c3dd5a19992cfb6c9831f6cbce9d95c247812",
+    "math:train:d6b790dfa830b84dff43c823e3afbc831d490e43",
+    "math:train:fe9dbacfd264d177bf3e1e3b9305c26db0425b50",
+)
+MATH_COMPLETION_TARGET_IDS = MATH_COMPLETION_RETEST_IDS + MATH_COMPLETION_NEW_IDS
 RECLOR_OUTPUT_RULES = (
     "\n\nYou may provide reasoning before the final answer.\n"
     "Your final line MUST be exactly:\nFinal Answer: X\n"
@@ -138,7 +153,12 @@ def prompt_contract_hash(
     if recipe not in _RECIPE_PROMPT_REVISIONS:
         raise ValueError("unknown generation recipe")
     selection = (
-        {"math_target_question_ids": sorted(MATH_COMPLETION_TARGET_IDS)}
+        {
+            "math_target_question_ids": sorted(MATH_COMPLETION_TARGET_IDS),
+            "math_retest_ids": sorted(MATH_COMPLETION_RETEST_IDS),
+            "math_fresh_ids": sorted(MATH_COMPLETION_NEW_IDS),
+            "fresh_selection_seed": 42,
+        }
         if recipe == "math-completion-v2"
         else {}
     )
@@ -576,14 +596,33 @@ def _validate_phase2_config(config: GenerationConfig) -> None:
         raise GenerationConfigurationError("Phase 2 prompt contract does not match")
 
 
-def load_phase2_split(root: Path, manifest: Mapping[str, object]):
-    """Load the approved 20+20 private smoke through the frozen split validator."""
+def load_phase2_split(root: Path, manifest: Mapping[str, object], *, recipe="smoke-v1"):
+    """Load smoke or fixed MATH cohorts through the frozen split validator."""
     from scripts_permstudy.data import _common as io
     from scripts_permstudy.data.plan_generation import load_split
 
-    _, smoke = load_split(root, manifest)
+    result, smoke = load_split(root, manifest)
     questions = io.records(root, manifest, "questions.jsonl", QuestionRecord)
     by_id = {question.original_question_id: question for question in questions}
+    if recipe == "math-completion-v2":
+        smoke_ids = {a.original_question_id for a in smoke}
+        chosen = tuple(
+            a
+            for a in result.assignments
+            if a.original_question_id in MATH_COMPLETION_TARGET_IDS
+        )
+        if (
+            len(chosen) != 27
+            or {a.original_question_id for a in chosen}
+            != set(MATH_COMPLETION_TARGET_IDS)
+            or any(
+                a.source is not Source.MATH or a.split.value != "train" for a in chosen
+            )
+            or not set(MATH_COMPLETION_RETEST_IDS) <= smoke_ids
+            or not set(MATH_COMPLETION_NEW_IDS).isdisjoint(smoke_ids)
+        ):
+            raise io.IntegrityError()
+        return tuple(by_id[a.original_question_id] for a in chosen), chosen
     selected = tuple(by_id[item.original_question_id] for item in smoke)
     if len(selected) != 40 or {
         source: sum(question.source is source for question in selected)
@@ -591,6 +630,12 @@ def load_phase2_split(root: Path, manifest: Mapping[str, object]):
     } != {Source.MATH: 20, Source.RECLOR: 20}:
         raise io.IntegrityError()
     return selected, tuple(smoke)
+
+
+def _load_recipe_split(root, manifest, recipe, split_loader):
+    if split_loader is load_phase2_split:
+        return split_loader(root, manifest, recipe=recipe)
+    return split_loader(root, manifest)
 
 
 def _generation_plan(
@@ -611,7 +656,7 @@ def _generation_plan(
             if item.original_question_id in MATH_COMPLETION_TARGET_IDS
         )
         if (
-            len(smoke) != 17
+            len(smoke) != 27
             or {item.original_question_id for item in smoke}
             != set(MATH_COMPLETION_TARGET_IDS)
             or any(
@@ -693,7 +738,6 @@ def _load_real_generation(
     from scripts_permstudy.data import _common as io
 
     split = io.upstream(root, manifest, "split")
-    questions, smoke = split_loader(root, split)
     configs = manifest["typed_config"]["parameters"]["generators"]
     recipe = next(
         (
@@ -703,6 +747,7 @@ def _load_real_generation(
         ),
         "smoke-v1",
     )
+    questions, smoke = _load_recipe_split(root, split, recipe, split_loader)
     plan = _generation_plan(split, smoke, recipe=recipe)
     planned_ids = {item.original_question_id for item in plan.candidates}
     questions = tuple(
@@ -831,7 +876,7 @@ def _dispatch_generate(
     from scripts_permstudy.data import _common as io
 
     split = io.load_manifest(root, args.split_manifest, "split")
-    questions, smoke = split_loader(root, split)
+    questions, smoke = _load_recipe_split(root, split, args.recipe, split_loader)
     plan = _generation_plan(split, smoke, recipe=args.recipe)
     if args.generator_id not in {
         config.generator_id for config in plan.generator_configs
