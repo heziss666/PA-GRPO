@@ -282,6 +282,172 @@ def test_llama_diagnostic_recipe_uses_new_prompt_and_only_reclor_candidates(
     assert all("Your final line MUST be exactly:" in item[1] for item in engine.added)
 
 
+def math_completion_fixture():
+    from dataclasses import replace
+    from scripts_permstudy.phase2 import run_real_smoke as cli
+
+    questions = (
+        tuple(
+            replace(math_question(index + 1), original_question_id=identity)
+            for index, identity in enumerate(cli.MATH_COMPLETION_TARGET_IDS)
+        )
+        + tuple(
+            replace(math_question(index + 30), original_question_id=identity)
+            for index, identity in enumerate(
+                (
+                    "math:train:1c5ed86358eba347d35418b19f4352c8562604a2",
+                    "math:train:387cd2f0c4f2f6e0439da6ee4e114cdf3fa5a0e5",
+                    "math:train:268bfb61ce054a767bc4f45177835e85b1b228ed",
+                )
+            )
+        )
+        + (reclor_question(),)
+    )
+    split = {
+        "split_manifest_hash": "94f6dabb281daf22723c3797244c17a9c8fd520a1688c0f509e5d2c5fd1a3bde",
+        "output_manifest_hash": SPLIT_ENVELOPE_HASH,
+    }
+    return questions, split
+
+
+def test_math_recipe_plans_68_requests_and_renders_concise_prompt_without_gold(
+    monkeypatch,
+):
+    """Wrong source/model/length or dropped selection binding must fail here."""
+    from dataclasses import replace
+    from permstudy.data_pipeline.generation import VLLMGenerationBackend
+    from scripts_permstudy.phase2 import run_real_smoke as cli
+
+    questions, split = math_completion_fixture()
+    assignments = tuple(assignment(q) for q in questions)
+    old = cli._generation_plan(split, assignments)
+    plan = cli._generation_plan(split, assignments, recipe="math-completion-v2")
+    assert len(plan.candidates) == 68
+    assert len({c.original_question_id for c in plan.candidates}) == 17
+    assert all(c.source is Source.MATH for c in plan.candidates)
+    assert {c.generator_id for c in plan.candidates} == {
+        "qwen2.5-7b-instruct",
+        "llama-3.1-8b-instruct",
+    }
+    assert all(
+        c.max_new_tokens == 1024
+        and c.temperature == 0.8
+        and c.top_p == 0.95
+        and c.samples_per_question == 2
+        for c in plan.generator_configs
+    )
+    assert {c.candidate_id for c in plan.candidates} <= {
+        c.candidate_id for c in old.candidates
+    }
+    assert plan.generation_run_id != old.generation_run_id
+    assert (
+        cli._generation_plan(
+            split,
+            tuple(reversed(assignments)),
+            recipe="math-completion-v2",
+        ).generation_run_id
+        == plan.generation_run_id
+    )
+    engine = ScriptedLowLevelEngine()
+    install_fake_vllm(monkeypatch, fake_vllm_module(engine, []))
+    config = plan.generator_configs[0]
+    batch = tuple(c for c in plan.candidates if c.generator_id == config.generator_id)[
+        :2
+    ]
+    VLLMGenerationBackend(engine_factory=cli.CachedEngineFactory(questions)).generate(
+        batch, config
+    )
+    assert all(item[2].values["max_tokens"] == 1024 for item in engine.added)
+    assert all("keep the reasoning concise" in item[1] for item in engine.added)
+    assert all("Private solution" not in item[1] for item in engine.added)
+    with pytest.raises(ValueError):
+        cli.render_messages(
+            reclor_question(), prompt_template_revision=config.prompt_template_revision
+        )
+    with pytest.raises(ValueError):
+        cli._generation_plan(
+            split,
+            tuple(replace(a, split=Split.INTERNAL_HOLDOUT) for a in assignments),
+            recipe="math-completion-v2",
+        )
+    original_hash = config.prompt_template_hash
+    monkeypatch.setattr(
+        cli,
+        "MATH_COMPLETION_TARGET_IDS",
+        tuple(reversed(cli.MATH_COMPLETION_TARGET_IDS[:-1])),
+    )
+    assert cli.prompt_contract_hash(recipe="math-completion-v2") != original_hash
+
+
+@pytest.mark.parametrize("corruption", ["missing_target", "wrong_split"])
+def test_math_recipe_rejects_incomplete_or_different_approved_question_pool(corruption):
+    from scripts_permstudy.phase2 import run_real_smoke as cli
+
+    questions, split = math_completion_fixture()
+    if corruption == "missing_target":
+        questions = questions[1:]
+    else:
+        split["split_manifest_hash"] = SPLIT_HASH
+    with pytest.raises(ValueError):
+        cli._generation_plan(
+            split, tuple(assignment(q) for q in questions), recipe="math-completion-v2"
+        )
+
+
+def test_math_recipe_cli_generation_reloads_exact_selected_artifacts(
+    monkeypatch, tmp_path
+):
+    """Both model commands and the downstream loader must agree on 17 questions."""
+    from permstudy.data_pipeline.generation import GenerationConfigurationError
+    from scripts_permstudy.data import _common as io
+    from scripts_permstudy.phase2 import run_real_smoke as cli
+
+    questions, split = math_completion_fixture()
+    assignments = tuple(assignment(q) for q in questions)
+    monkeypatch.setattr(io, "load_manifest", lambda *args: split)
+    monkeypatch.setattr(io, "upstream", lambda *args: split)
+    # Split/source acquisition is already tested in Phase 1. Keep the actual
+    # candidate, shard, generation-manifest and record-loading code here.
+    io.persist_bytes(
+        tmp_path, "split/fixture/manifest.json", io.canonical_json_bytes(split), 1
+    )
+    low_level = ScriptedLowLevelEngine()
+    install_fake_vllm(monkeypatch, fake_vllm_module(low_level, []))
+
+    def loader(root, manifest):
+        return questions, assignments
+
+    parser = cli.build_parser()
+    base = [
+        "generate",
+        "--split-manifest",
+        "split/fixture/manifest.json",
+        "--recipe",
+        "math-completion-v2",
+    ]
+    for generator in ("qwen2.5-7b-instruct", "llama-3.1-8b-instruct"):
+        args = parser.parse_args([*base, "--generator-id", generator])
+        result = cli.dispatch(args, tmp_path, split_loader=loader)
+    assert result["count"] == 68
+    persisted = io.read_json(tmp_path / f"generation/{result['run_id']}/manifest.json")
+    _, plan, loaded_questions, candidates = cli._load_real_generation(
+        tmp_path, persisted, loader
+    )
+    assert len(plan.candidates) == len(candidates) == 68
+    assert len(loaded_questions) == 17
+    assert all(q.source is Source.MATH for q in loaded_questions)
+    with pytest.raises(io.CLIContractError):
+        cli.dispatch(
+            parser.parse_args([*base, "--generator-id", "qwen2.5-32b-instruct"]),
+            tmp_path,
+            split_loader=loader,
+        )
+    with pytest.raises(GenerationConfigurationError):
+        cli._load_real_generation(
+            tmp_path, persisted, lambda root, manifest: (questions, assignments[1:])
+        )
+
+
 def test_native_adapter_keeps_request_identity_when_engine_finishes_out_of_order(
     monkeypatch,
 ):

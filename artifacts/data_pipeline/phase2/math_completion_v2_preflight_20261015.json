@@ -1,0 +1,36 @@
+{
+  "schema_version": "phase2_math_completion_preflight_v1",
+  "phase_status": "MATH_COMPLETION_V2_CPU_READY_GPU_HOLD",
+  "real_generation_performed": false,
+  "split_manifest_hash": "94f6dabb281daf22723c3797244c17a9c8fd520a1688c0f509e5d2c5fd1a3bde",
+  "question_counts": {
+    "original_math": 20,
+    "supported_math": 19,
+    "already_paired_math": 2,
+    "target_math": 17
+  },
+  "completion_counts": {
+    "original_math_candidates": 120,
+    "original_math_length_finishes": 59,
+    "supported_math_candidates": 114,
+    "supported_math_length_finishes": 56,
+    "target_old_candidates": 102,
+    "target_old_length_finishes": 54,
+    "new_planned_candidates": 68,
+    "qwen7b_planned": 34,
+    "llama8b_planned": 34,
+    "new_generated_candidates": 0,
+    "flawed_reclor_positive_selected": 0,
+    "gpu_execution_authorized": 0,
+    "training_steps": 0
+  },
+  "source_revisions": {
+    "Qwen/Qwen2.5-7B-Instruct": "a09a35458c702b33eeacc393d103063234e8bc28",
+    "meta-llama/Llama-3.1-8B-Instruct": "0e9e39f249a16976918f6564b8830bc894c89659"
+  },
+  "run_ids": {
+    "planned_generation": "11d1c7a62aacea8879801a159d8693c712b2a4eb80885d8fe4fd8c653b1e1d5a",
+    "selection_reference_verification": "df543278bd12bcca7ae6a3079064f0a50f6db560e1e78cbb5b783c99f63c406d",
+    "selection_reference_pairs": "1eef16d5afe9d92ee4e1d2eb30044b99d0bf915a69c3d8f1f41a0a46d598615a"
+  }
+}

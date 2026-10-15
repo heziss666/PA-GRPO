@@ -364,3 +364,40 @@ the label-checked Parquet, run one step per mode sequentially (`STEPS=1`,
 storage before each run; keep outputs private. These are wiring checks, not
 four completed research trainings. GPU execution awaits an accessible instance;
 resource usage remains bounded by the previously agreed budget.
+
+## MATH targeted completion diagnostic (2026-10-15; GPU HOLD)
+
+ReClor prompt diagnosis is closed. The reviewed response with an overbroad
+reasoning claim was not selected as a positive in the seven diagnostic pairs;
+no candidate or pair replacement was needed.
+
+The original MATH candidate files contain 59 `length` finishes out of 120.
+Restricting to the 19 supported-gold questions gives 56/114; restricting further
+to the 17 unpaired questions gives 54/102. These raw finish-reason counts justify
+testing 1024 output tokens; they are not the older invalid-reason category count.
+
+The existing launcher now accepts `--recipe math-completion-v2`: the approved
+17 unpaired MATH training questions, Qwen2.5-7B and Llama-3.1-8B, two samples
+each (34 per model, 68 total). Temperature 0.8, top-p 0.95, pinned model revisions,
+seed and runtime parameters remain unchanged. Only output length (1024) and the
+versioned concise-reasoning/terminal-boxed instruction change. The exact target
+IDs participate in the prompt-contract hash, and the recipe requires the
+approved split. This keeps the existing frozen GenerationConfig schema intact.
+
+CPU preflight plans run
+`11d1c7a62aacea8879801a159d8693c712b2a4eb80885d8fe4fd8c653b1e1d5a`.
+It does not generate candidates. After separate GPU execution confirmation,
+run the existing `generate` command twice, first with
+`--generator-id qwen2.5-7b-instruct --recipe math-completion-v2`, then in a new
+process with `--generator-id llama-3.1-8b-instruct --recipe math-completion-v2`,
+using the same approved split reference and external data root. No 32B run is
+part of this recipe. The maximum output budget is 69,632 tokens; GPU price and
+available hardware must be confirmed before any paid execution.
+
+Reuse existing verification, audit, pair selection, and export functions. Keep
+old and new runs separate; do not pair an old-run correct response with a new-run
+incorrect response. Judge the diagnostic by truncation, validity, binary labels,
+and newly covered independent questions. Do not rerun the full Phase 1 suite or
+require the three-model Statistical Gate to pass for this restricted diagnosis.
+Move to new MATH questions after this bounded probe instead of repeatedly
+resampling the original smoke. Pilot and training are not authorized here.

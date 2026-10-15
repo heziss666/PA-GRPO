@@ -47,6 +47,41 @@ from permstudy.data_pipeline.verification import (
 REQUEST_SEED_VERSION = "candidate_request_seed_sha256_v1"
 PROMPT_TEMPLATE_REVISION = f"phase2_real_candidate_prompt_v1+{REQUEST_SEED_VERSION}"
 LLAMA_RECLOR_PROMPT_REVISION = f"phase2_llama_reclor_prompt_v2+{REQUEST_SEED_VERSION}"
+MATH_COMPLETION_PROMPT_REVISION = f"phase2_math_completion_v2+{REQUEST_SEED_VERSION}"
+_RECIPE_PROMPT_REVISIONS = {
+    "smoke-v1": PROMPT_TEMPLATE_REVISION,
+    "llama-reclor-prompt-v2": LLAMA_RECLOR_PROMPT_REVISION,
+    "math-completion-v2": MATH_COMPLETION_PROMPT_REVISION,
+}
+MATH_COMPLETION_SYSTEM_PROMPT = (
+    "Solve the problem carefully and keep the reasoning concise. End with "
+    "exactly one final answer in \\boxed{...}. Do not write anything after "
+    "the boxed answer."
+)
+# Fixed diagnostic selection: approved smoke minus the two already-paired
+# questions and the quarantined option-label gold. IDs, not source text.
+MATH_COMPLETION_SPLIT_HASH = (
+    "94f6dabb281daf22723c3797244c17a9c8fd520a1688c0f509e5d2c5fd1a3bde"
+)
+MATH_COMPLETION_TARGET_IDS = (
+    "math:train:1bf2b23575c2e412cf0149305f47a340eb55d155",
+    "math:train:3266eb2e025c6866e8c4e30070a6a26f367ee025",
+    "math:train:5cf253158c853c357b77f208519c159106940b5c",
+    "math:train:6742b76a3290968746809c479bd3ca8357c05989",
+    "math:train:70f3eba20520d155758ed14abf4448f78468391b",
+    "math:train:760176fd785b4ee03b6bf68fbbcd6c58aa511e56",
+    "math:train:7c95aa4e07619f79c586f2fa56d621d52ea3375b",
+    "math:train:8ae4eddfc07d1116f10f59e785249fcb478e64a9",
+    "math:train:be6d471e15e916a14db87d19e335f5a635955d08",
+    "math:train:c8929edfef69d84efe198556b890c5b6e2aedb88",
+    "math:train:c9335349e6cf21dff658dc76461b713041f20007",
+    "math:train:cf83cb51d66ec13ff259db96efc5a2dec37089d5",
+    "math:train:d02975c0642f250ff98d0f9e407ff1dba7ff575b",
+    "math:train:d2d74c73d9cc0d08e95db26e791ff8bbcb1a1c1e",
+    "math:train:d88cd1711c78a6d6965246533914cd6ffdfd6abf",
+    "math:train:f706f439c308876702e1871c4ee566718739510b",
+    "math:train:ff91a3878a8b7f2af8c626f7a5b8ecc13c76c5d1",
+)
 RECLOR_OUTPUT_RULES = (
     "\n\nYou may provide reasoning before the final answer.\n"
     "Your final line MUST be exactly:\nFinal Answer: X\n"
@@ -100,12 +135,21 @@ def prompt_contract_hash(
     """Hash the exact prompt text together with request-seed semantics."""
     if not isinstance(request_seed_version, str) or not request_seed_version.strip():
         raise ValueError("request_seed_version must be nonempty text")
-    if recipe not in ("smoke-v1", "llama-reclor-prompt-v2"):
+    if recipe not in _RECIPE_PROMPT_REVISIONS:
         raise ValueError("unknown generation recipe")
+    selection = (
+        {"math_target_question_ids": sorted(MATH_COMPLETION_TARGET_IDS)}
+        if recipe == "math-completion-v2"
+        else {}
+    )
     return sha256_hex(
         canonical_json_bytes(
             {
-                "math_system": MATH_SYSTEM_PROMPT,
+                "math_system": (
+                    MATH_COMPLETION_SYSTEM_PROMPT
+                    if recipe == "math-completion-v2"
+                    else MATH_SYSTEM_PROMPT
+                ),
                 "math_user": "{problem}",
                 "reclor_system": RECLOR_SYSTEM_PROMPT,
                 "reclor_user": (
@@ -114,6 +158,7 @@ def prompt_contract_hash(
                 )
                 + (RECLOR_OUTPUT_RULES if recipe == "llama-reclor-prompt-v2" else ""),
                 "request_seed_version": request_seed_version,
+                **selection,
             }
         )
     )
@@ -124,7 +169,14 @@ def build_real_generation_configs(
     *,
     recipe: str = "smoke-v1",
 ) -> tuple[GenerationConfig, ...]:
-    """Build the original smoke or the small Llama/ReClor prompt diagnostic."""
+    """Build one fixed smoke/diagnostic recipe without changing Phase 1 schema."""
+    if (
+        recipe == "math-completion-v2"
+        and split_manifest_hash != MATH_COMPLETION_SPLIT_HASH
+    ):
+        raise GenerationConfigurationError(
+            "MATH diagnostic requires the approved split"
+        )
     prompt_hash = prompt_contract_hash(recipe=recipe)
     diagnostic = recipe == "llama-reclor-prompt-v2"
     return tuple(
@@ -133,13 +185,11 @@ def build_real_generation_configs(
             generator_id=generator_id,
             model_repository=repository,
             model_revision=revision,
-            prompt_template_revision=(
-                LLAMA_RECLOR_PROMPT_REVISION if diagnostic else PROMPT_TEMPLATE_REVISION
-            ),
+            prompt_template_revision=_RECIPE_PROMPT_REVISIONS[recipe],
             prompt_template_hash=prompt_hash,
             temperature=0.8,
             top_p=0.95,
-            max_new_tokens=512,
+            max_new_tokens=1024 if recipe == "math-completion-v2" else 512,
             seed=42,
             batch_size=batch_size,
             tensor_parallel_size=1,
@@ -156,6 +206,7 @@ def build_real_generation_configs(
             gpu_memory_utilization,
         ) in _REAL_GENERATOR_RECIPE
         if not diagnostic or generator_id == "llama-3.1-8b-instruct"
+        if recipe != "math-completion-v2" or generator_id != "qwen2.5-32b-instruct"
     )
 
 
@@ -196,17 +247,19 @@ def render_messages(
     if not isinstance(question, QuestionRecord):
         raise TypeError("question must be a QuestionRecord")
     question.validate()
-    if prompt_template_revision not in (
-        PROMPT_TEMPLATE_REVISION,
-        LLAMA_RECLOR_PROMPT_REVISION,
-    ):
+    if prompt_template_revision not in _RECIPE_PROMPT_REVISIONS.values():
         raise GenerationConfigurationError("unknown prompt revision")
     diagnostic = prompt_template_revision == LLAMA_RECLOR_PROMPT_REVISION
     if diagnostic and question.source is not Source.RECLOR:
         raise GenerationConfigurationError("Llama prompt diagnostic requires ReClor")
+    math_completion = prompt_template_revision == MATH_COMPLETION_PROMPT_REVISION
+    if math_completion and question.source is not Source.MATH:
+        raise GenerationConfigurationError("MATH completion diagnostic requires MATH")
     if question.source is Source.MATH:
         user = question.problem
-        system = MATH_SYSTEM_PROMPT
+        system = (
+            MATH_COMPLETION_SYSTEM_PROMPT if math_completion else MATH_SYSTEM_PROMPT
+        )
     else:
         answer_a, answer_b, answer_c, answer_d = question.answers
         user = (
@@ -495,13 +548,28 @@ def _validate_phase2_config(config: GenerationConfig) -> None:
     config.validate()
     if config.backend != "vllm":
         raise GenerationConfigurationError("Phase 2 requires backend='vllm'")
-    diagnostic = config.prompt_template_revision == LLAMA_RECLOR_PROMPT_REVISION
-    recipe = "llama-reclor-prompt-v2" if diagnostic else "smoke-v1"
+    recipe = next(
+        (
+            name
+            for name, revision in _RECIPE_PROMPT_REVISIONS.items()
+            if revision == config.prompt_template_revision
+        ),
+        None,
+    )
     if (
-        (diagnostic and config.generator_id != "llama-3.1-8b-instruct")
+        recipe is None
         or (
-            not diagnostic
-            and config.prompt_template_revision != PROMPT_TEMPLATE_REVISION
+            recipe == "llama-reclor-prompt-v2"
+            and config.generator_id != "llama-3.1-8b-instruct"
+        )
+        or (
+            recipe == "math-completion-v2"
+            and (
+                config.generator_id
+                not in ("qwen2.5-7b-instruct", "llama-3.1-8b-instruct")
+                or config.max_new_tokens != 1024
+                or config.split_manifest_hash != MATH_COMPLETION_SPLIT_HASH
+            )
         )
         or config.prompt_template_hash != prompt_contract_hash(recipe=recipe)
     ):
@@ -536,6 +604,24 @@ def _generation_plan(
     )
     if recipe == "llama-reclor-prompt-v2":
         smoke = tuple(item for item in smoke if item.source is Source.RECLOR)
+    elif recipe == "math-completion-v2":
+        smoke = tuple(
+            item
+            for item in smoke
+            if item.original_question_id in MATH_COMPLETION_TARGET_IDS
+        )
+        if (
+            len(smoke) != 17
+            or {item.original_question_id for item in smoke}
+            != set(MATH_COMPLETION_TARGET_IDS)
+            or any(
+                item.source is not Source.MATH or item.split.value != "train"
+                for item in smoke
+            )
+        ):
+            raise GenerationConfigurationError(
+                "MATH diagnostic question selection differs"
+            )
     return plan_generation(
         smoke,
         configs,
@@ -609,17 +695,19 @@ def _load_real_generation(
     split = io.upstream(root, manifest, "split")
     questions, smoke = split_loader(root, split)
     configs = manifest["typed_config"]["parameters"]["generators"]
-    recipe = (
-        "llama-reclor-prompt-v2"
-        if any(
-            item["prompt_template_revision"] == LLAMA_RECLOR_PROMPT_REVISION
-            for item in configs
-        )
-        else "smoke-v1"
+    recipe = next(
+        (
+            name
+            for name, revision in _RECIPE_PROMPT_REVISIONS.items()
+            if any(item["prompt_template_revision"] == revision for item in configs)
+        ),
+        "smoke-v1",
     )
     plan = _generation_plan(split, smoke, recipe=recipe)
-    if recipe == "llama-reclor-prompt-v2":
-        questions = tuple(item for item in questions if item.source is Source.RECLOR)
+    planned_ids = {item.original_question_id for item in plan.candidates}
+    questions = tuple(
+        item for item in questions if item.original_question_id in planned_ids
+    )
     if (
         manifest.get("typed_config")
         != generation_stage_config(
@@ -713,7 +801,7 @@ def build_parser():
     )
     generate.add_argument("--recover-stale-lock", action="store_true")
     generate.add_argument(
-        "--recipe", choices=("smoke-v1", "llama-reclor-prompt-v2"), default="smoke-v1"
+        "--recipe", choices=tuple(_RECIPE_PROMPT_REVISIONS), default="smoke-v1"
     )
 
     verify = commands.add_parser("verify")
@@ -745,10 +833,14 @@ def _dispatch_generate(
     split = io.load_manifest(root, args.split_manifest, "split")
     questions, smoke = split_loader(root, split)
     plan = _generation_plan(split, smoke, recipe=args.recipe)
-    if args.recipe == "llama-reclor-prompt-v2":
-        if args.generator_id != "llama-3.1-8b-instruct":
-            raise io.CLIContractError()
-        questions = tuple(item for item in questions if item.source is Source.RECLOR)
+    if args.generator_id not in {
+        config.generator_id for config in plan.generator_configs
+    }:
+        raise io.CLIContractError()
+    planned_ids = {item.original_question_id for item in plan.candidates}
+    questions = tuple(
+        item for item in questions if item.original_question_id in planned_ids
+    )
     config = generation_stage_config(
         plan.generator_configs,
         samples_per_question=2,
