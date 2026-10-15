@@ -1,0 +1,43 @@
+{
+  "schema_version": "phase2_production_generation_v1",
+  "git_sha": "06025470507842c53fae1d42d2553c57195b7828",
+  "phase_status": "PRODUCTION_200_PER_SOURCE_GENERATION_COMPLETE_VERIFICATION_PENDING",
+  "real_generation_performed": true,
+  "split_manifest_hash": "94f6dabb281daf22723c3797244c17a9c8fd520a1688c0f509e5d2c5fd1a3bde",
+  "run_ids": {
+    "math": "9c995c952f206966a6709c74a70be5482eeb8e4f56dca2c0ad114b39de6e87f9",
+    "reclor": "a4831878b7adff3ca070b8b80c6f2f5ea1229022918d1d4c8221cc54f6a248e9"
+  },
+  "source_revisions": {
+    "Qwen/Qwen2.5-7B-Instruct": "a09a35458c702b33eeacc393d103063234e8bc28",
+    "meta-llama/Llama-3.1-8B-Instruct": "0e9e39f249a16976918f6564b8830bc894c89659"
+  },
+  "question_counts": {"math": 200, "reclor": 200, "total": 400},
+  "completion_counts": {
+    "math": {
+      "planned": 800,
+      "successful": 800,
+      "by_generator": {"llama-3.1-8b-instruct": 400, "qwen2.5-7b-instruct": 400},
+      "finish_reason": {"length": 97, "stop": 703},
+      "output_total": 347513
+    },
+    "reclor": {
+      "planned": 800,
+      "successful": 800,
+      "by_generator": {"llama-3.1-8b-instruct": 400, "qwen2.5-7b-instruct": 400},
+      "finish_reason": {"stop": 798, "length": 2},
+      "output_total": 158112
+    },
+    "planned": 1600,
+    "successful": 1600,
+    "training_steps": 0,
+    "unchanged_historical_shards": 49
+  },
+  "artifact_hashes": {
+    "raw_backup": "a696c5649d790b48af15c24a5274ae1454285562c227750115ab313123e84a80",
+    "math_generation_manifest": "c208a3b982252f7ac086d081fe8d7132ef2c9b96516c237cc5d454c8f2147b0f",
+    "math_semantic_set": "1686e02fb6793176ad1274cdcdd66143a30a03689a9eed64372eaa4d76e759da",
+    "reclor_generation_manifest": "1b54ddf4f8be365f888f96d68937f453048da74e66ed7330a7c7bac69c5852e8",
+    "reclor_semantic_set": "41cb10282a8baeb03430bf4d5ec75723b19d75bb6bb8a35fb1b6e9f7348295ac"
+  }
+}
