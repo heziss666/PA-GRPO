@@ -48,10 +48,19 @@ REQUEST_SEED_VERSION = "candidate_request_seed_sha256_v1"
 PROMPT_TEMPLATE_REVISION = f"phase2_real_candidate_prompt_v1+{REQUEST_SEED_VERSION}"
 LLAMA_RECLOR_PROMPT_REVISION = f"phase2_llama_reclor_prompt_v2+{REQUEST_SEED_VERSION}"
 MATH_COMPLETION_PROMPT_REVISION = f"phase2_math_completion_v2+{REQUEST_SEED_VERSION}"
+PRODUCTION_SELECTION_VERSION = "fresh_train_stratified_200_seed42_v1"
+_PRODUCTION_SOURCES = {
+    "math-production-200-v1": Source.MATH,
+    "reclor-production-200-v1": Source.RECLOR,
+}
 _RECIPE_PROMPT_REVISIONS = {
     "smoke-v1": PROMPT_TEMPLATE_REVISION,
     "llama-reclor-prompt-v2": LLAMA_RECLOR_PROMPT_REVISION,
     "math-completion-v2": MATH_COMPLETION_PROMPT_REVISION,
+    **{
+        recipe: f"phase2_{source.value}_production_200_v1+{REQUEST_SEED_VERSION}"
+        for recipe, source in _PRODUCTION_SOURCES.items()
+    },
 }
 MATH_COMPLETION_SYSTEM_PROMPT = (
     "Solve the problem carefully and keep the reasoning concise. End with "
@@ -162,12 +171,21 @@ def prompt_contract_hash(
         if recipe == "math-completion-v2"
         else {}
     )
+    if recipe in _PRODUCTION_SOURCES:
+        selection = {
+            "selection_algorithm": PRODUCTION_SELECTION_VERSION,
+            "selection_seed": 42,
+            "per_source": 200,
+            "source": _PRODUCTION_SOURCES[recipe].value,
+            "exclude_original_smoke": True,
+            "exclude_math_fresh_ids": sorted(MATH_COMPLETION_NEW_IDS),
+        }
     return sha256_hex(
         canonical_json_bytes(
             {
                 "math_system": (
                     MATH_COMPLETION_SYSTEM_PROMPT
-                    if recipe == "math-completion-v2"
+                    if recipe in ("math-completion-v2", "math-production-200-v1")
                     else MATH_SYSTEM_PROMPT
                 ),
                 "math_user": "{problem}",
@@ -176,7 +194,11 @@ def prompt_contract_hash(
                     "Context:\n{context}\n\nQuestion:\n{question}\n\n"
                     "A. {answer_a}\nB. {answer_b}\nC. {answer_c}\nD. {answer_d}"
                 )
-                + (RECLOR_OUTPUT_RULES if recipe == "llama-reclor-prompt-v2" else ""),
+                + (
+                    RECLOR_OUTPUT_RULES
+                    if recipe in ("llama-reclor-prompt-v2", "reclor-production-200-v1")
+                    else ""
+                ),
                 "request_seed_version": request_seed_version,
                 **selection,
             }
@@ -191,7 +213,7 @@ def build_real_generation_configs(
 ) -> tuple[GenerationConfig, ...]:
     """Build one fixed smoke/diagnostic recipe without changing Phase 1 schema."""
     if (
-        recipe == "math-completion-v2"
+        recipe in ("math-completion-v2", *_PRODUCTION_SOURCES)
         and split_manifest_hash != MATH_COMPLETION_SPLIT_HASH
     ):
         raise GenerationConfigurationError(
@@ -209,7 +231,9 @@ def build_real_generation_configs(
             prompt_template_hash=prompt_hash,
             temperature=0.8,
             top_p=0.95,
-            max_new_tokens=1024 if recipe == "math-completion-v2" else 512,
+            max_new_tokens=1024
+            if recipe in ("math-completion-v2", "math-production-200-v1")
+            else 512,
             seed=42,
             batch_size=batch_size,
             tensor_parallel_size=1,
@@ -226,7 +250,8 @@ def build_real_generation_configs(
             gpu_memory_utilization,
         ) in _REAL_GENERATOR_RECIPE
         if not diagnostic or generator_id == "llama-3.1-8b-instruct"
-        if recipe != "math-completion-v2" or generator_id != "qwen2.5-32b-instruct"
+        if recipe not in ("math-completion-v2", *_PRODUCTION_SOURCES)
+        or generator_id != "qwen2.5-32b-instruct"
     )
 
 
@@ -270,9 +295,15 @@ def render_messages(
     if prompt_template_revision not in _RECIPE_PROMPT_REVISIONS.values():
         raise GenerationConfigurationError("unknown prompt revision")
     diagnostic = prompt_template_revision == LLAMA_RECLOR_PROMPT_REVISION
-    if diagnostic and question.source is not Source.RECLOR:
+    reclor_production = (
+        prompt_template_revision == _RECIPE_PROMPT_REVISIONS["reclor-production-200-v1"]
+    )
+    if (diagnostic or reclor_production) and question.source is not Source.RECLOR:
         raise GenerationConfigurationError("Llama prompt diagnostic requires ReClor")
-    math_completion = prompt_template_revision == MATH_COMPLETION_PROMPT_REVISION
+    math_completion = prompt_template_revision in (
+        MATH_COMPLETION_PROMPT_REVISION,
+        _RECIPE_PROMPT_REVISIONS["math-production-200-v1"],
+    )
     if math_completion and question.source is not Source.MATH:
         raise GenerationConfigurationError("MATH completion diagnostic requires MATH")
     if question.source is Source.MATH:
@@ -287,7 +318,7 @@ def render_messages(
             f"A. {answer_a}\nB. {answer_b}\nC. {answer_c}\nD. {answer_d}"
         )
         system = RECLOR_SYSTEM_PROMPT
-        if diagnostic:
+        if diagnostic or reclor_production:
             user += RECLOR_OUTPUT_RULES
     return ({"role": "system", "content": system}, {"role": "user", "content": user})
 
@@ -594,6 +625,12 @@ def _validate_phase2_config(config: GenerationConfig) -> None:
         or config.prompt_template_hash != prompt_contract_hash(recipe=recipe)
     ):
         raise GenerationConfigurationError("Phase 2 prompt contract does not match")
+    if recipe in _PRODUCTION_SOURCES and config not in build_real_generation_configs(
+        config.split_manifest_hash, recipe=recipe
+    ):
+        raise GenerationConfigurationError(
+            "production config differs from approved recipe"
+        )
 
 
 def load_phase2_split(root: Path, manifest: Mapping[str, object], *, recipe="smoke-v1"):
@@ -604,6 +641,25 @@ def load_phase2_split(root: Path, manifest: Mapping[str, object], *, recipe="smo
     result, smoke = load_split(root, manifest)
     questions = io.records(root, manifest, "questions.jsonl", QuestionRecord)
     by_id = {question.original_question_id: question for question in questions}
+    if recipe in _PRODUCTION_SOURCES:
+        from permstudy.data_pipeline.splitting import select_smoke_questions
+
+        if manifest["split_manifest_hash"] != MATH_COMPLETION_SPLIT_HASH:
+            raise io.IntegrityError()
+        excluded = {a.original_question_id for a in smoke} | set(
+            MATH_COMPLETION_NEW_IDS
+        )
+        # Reuse the existing proportional-stratum allocation. This selects a
+        # subset of the frozen training split; it never creates another split.
+        fresh = select_smoke_questions(
+            tuple(
+                a for a in result.assignments if a.original_question_id not in excluded
+            ),
+            per_source=200,
+            split_seed=42,
+        )
+        chosen = tuple(a for a in fresh if a.source is _PRODUCTION_SOURCES[recipe])
+        return tuple(by_id[a.original_question_id] for a in chosen), chosen
     if recipe == "math-completion-v2":
         smoke_ids = {a.original_question_id for a in smoke}
         chosen = tuple(
@@ -667,6 +723,18 @@ def _generation_plan(
             raise GenerationConfigurationError(
                 "MATH diagnostic question selection differs"
             )
+    elif recipe in _PRODUCTION_SOURCES:
+        if (
+            len(smoke) != 200
+            or len({a.original_question_id for a in smoke}) != 200
+            or any(
+                a.source is not _PRODUCTION_SOURCES[recipe]
+                or a.split.value != "train"
+                or a.original_question_id in MATH_COMPLETION_NEW_IDS
+                for a in smoke
+            )
+        ):
+            raise GenerationConfigurationError("production question selection differs")
     return plan_generation(
         smoke,
         configs,
@@ -836,6 +904,15 @@ def build_parser():
     parser = io.parser("run_real_smoke", common=False)
     commands = parser.add_subparsers(dest="command", required=True)
 
+    plan = commands.add_parser("plan")
+    io.add_common(plan)
+    plan.add_argument("--split-manifest", required=True)
+    plan.add_argument("--recipe", choices=tuple(_PRODUCTION_SOURCES), required=True)
+
+    training = commands.add_parser("prepare-training")
+    io.add_common(training)
+    training.add_argument("--trainer-manifest", required=True)
+
     generate = commands.add_parser("generate")
     io.add_common(generate)
     generate.add_argument("--split-manifest", required=True)
@@ -864,6 +941,127 @@ def build_parser():
         "--tokenizer-revision", choices=(PAIR_TOKENIZER_REVISION,), required=True
     )
     return parser
+
+
+def _dispatch_plan(args, root, *, split_loader):
+    """Persist a CPU-only plan using the existing generation manifest schema."""
+    from scripts_permstudy.data import _common as io
+
+    split = io.load_manifest(root, args.split_manifest, "split")
+    questions, assignments = _load_recipe_split(root, split, args.recipe, split_loader)
+    plan = _generation_plan(split, assignments, recipe=args.recipe)
+    prefix = f"generation/{plan.generation_run_id}"
+    refs = [
+        io.persist_records(root, f"{prefix}/plans.jsonl", plan.candidates),
+        io.persist_records(root, f"{prefix}/questions.jsonl", questions),
+    ]
+    config = generation_stage_config(
+        plan.generator_configs,
+        samples_per_question=2,
+        shard_size=8,
+        split_upstream_manifest_hash=split["output_manifest_hash"],
+    )
+    io.persist_manifest(
+        root,
+        "generation",
+        config,
+        refs,
+        {"planned": len(plan.candidates), "successful": 0},
+        {"split": args.split_manifest},
+        extra={"split_manifest_hash": split["split_manifest_hash"]},
+        filename="planned.json",
+    )
+    return {"run_id": plan.generation_run_id, "count": len(plan.candidates)}
+
+
+CONTROLLED_TRAINING_PROMPT_VERSION = "pairwise_judge_answer_tag_v1"
+CONTROLLED_TRAINING_SYSTEM = (
+    "Compare the two responses for correctness. You may reason before the final answer. "
+    "End with exactly one <answer>A</answer> or <answer>B</answer> tag."
+)
+CONTROLLED_TRAINING_FINAL_RULE = (
+    "End with exactly one <answer>A</answer> or <answer>B</answer> tag. "
+    "Do not write anything after it."
+)
+
+
+def controlled_training_rows(rows):
+    """Adapt only the frozen direct prompt, retaining all semantic identities."""
+    from copy import deepcopy
+    from permstudy.data_pipeline import trainer_export
+
+    trainer_export.validate_trainer_rows(rows)
+    adapted = deepcopy(rows)
+    direct_rule = "Answer with A or B only."
+    for row in adapted:
+        content = row["prompt"][1]["content"]
+        if not content.endswith(direct_rule):
+            raise ValueError("unrecognized direct training prompt")
+        row["prompt"] = [
+            {"role": "system", "content": CONTROLLED_TRAINING_SYSTEM},
+            {
+                "role": "user",
+                "content": content[: -len(direct_rule)]
+                + CONTROLLED_TRAINING_FINAL_RULE,
+            },
+        ]
+    return adapted
+
+
+def _dispatch_prepare_training(args, root):
+    """Create a separate prompt-adapted copy, never a training release."""
+    from io import BytesIO
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from permstudy.data_pipeline.lineage import role_bound_stage_config
+    from scripts_permstudy.data import _common as io
+
+    original = io.load_manifest(root, args.trainer_manifest, "trainer_export")
+    inputs = io.select_refs(original, "train.parquet")
+    if len(inputs) != 1 or inputs[0].record_count == 0:
+        raise io.IntegrityError()
+    source = inputs[0]
+    io.verify_artifact_ref(root, source)
+    rows = pq.read_table(io.rooted(root, source.relative_path)).to_pylist()
+    if len(rows) != source.record_count:
+        raise io.IntegrityError()
+    rows = io.checked(controlled_training_rows, rows, integrity=True)
+    config = role_bound_stage_config(
+        {
+            "input_export_manifest_hash": original["output_manifest_hash"],
+            "input_parquet_sha256": source.sha256,
+            "prompt_template_version": CONTROLLED_TRAINING_PROMPT_VERSION,
+            "prompt_template_hash": sha256_hex(
+                canonical_json_bytes(
+                    {
+                        "system": CONTROLLED_TRAINING_SYSTEM,
+                        "final_rule": CONTROLLED_TRAINING_FINAL_RULE,
+                    }
+                )
+            ),
+        },
+        original["upstream_bindings"],
+        {"split", "generation", "pairs", "permutations"},
+    )
+    identity = run_id("trainer_export", config)
+    buffer = BytesIO()
+    pq.write_table(pa.Table.from_pylist(rows), buffer)
+    ref = io.persist_bytes(
+        root, f"trainer_export/{identity}/train.parquet", buffer.getvalue(), len(rows)
+    )
+    manifest = io.persist_manifest(
+        root,
+        "trainer_export",
+        config,
+        [ref],
+        {"rows": len(rows)},
+        {
+            role: item["relative_path"]
+            for role, item in original["upstream_manifests"].items()
+        },
+        extra={"training_authorized": False},
+    )
+    return io.output(manifest)
 
 
 def _dispatch_generate(
@@ -1218,6 +1416,10 @@ def dispatch(
     engine_factory_builder=None,
     tokenizer_loader=None,
 ):
+    if args.command == "plan":
+        return _dispatch_plan(args, root, split_loader=split_loader)
+    if args.command == "prepare-training":
+        return _dispatch_prepare_training(args, root)
     if args.command == "generate":
         return _dispatch_generate(
             args,

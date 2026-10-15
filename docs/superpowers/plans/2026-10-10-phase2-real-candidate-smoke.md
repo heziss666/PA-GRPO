@@ -418,3 +418,86 @@ Do not rerun the full Phase 1 suite or
 require the three-model Statistical Gate to pass for this restricted diagnosis.
 Move to new MATH questions after this bounded probe instead of repeatedly
 resampling the original smoke. Pilot and training are not authorized here.
+
+## First production batch: 200 new questions per source (2026-10-15)
+
+The completed 108-candidate MATH diagnostic is closed; see its execution receipt.
+The user approved **200 new ReClor training questions and 200 new MATH training
+questions**, not 400 guaranteed pairs. This section replaces the earlier proposal
+for a 100-question batch. Current authorization covers CPU preparation only.
+No GPU instance was started, no weights downloaded, and no new answers generated.
+
+Use `--recipe math-production-200-v1` and `--recipe reclor-production-200-v1` in
+the existing Phase 2 entry point. Each source has a separate generation run so
+MATH retains 1024 output tokens and ReClor retains 512. Both use the pinned
+Qwen2.5-7B and Llama-3.1-8B, two samples per model per question: 800 candidates
+per source, 1,600 total. Temperature 0.8, top-p 0.95, seed 42, batch size 8,
+TP=1, max model length 4096 and memory utilization 0.85 are unchanged. No 32B
+sampling is included. The maximum combined output budget is 1,228,800 tokens,
+not an estimate of actual output or GPU billing; confirm price and time cap
+before separately authorizing execution.
+
+Selection reuses `select_smoke_questions(..., per_source=200, split_seed=42)`
+over the frozen assignments after removing the original smoke and the ten
+additional MATH diagnostic questions. This is subset selection, **not a new
+Train/Holdout split**. Existing strata are inherited: MATH category+level
+(35 covered cells), ReClor official label (four covered cells). The exact
+selection policy/version, source and count enter the prompt/config hash; the
+immutable split envelope binds the full source content and assignments.
+CPU checks found no overlap with holdout or any of the 50 previously generated
+questions. All 49 historical candidate shard hashes remained unchanged.
+
+CPU-only planning commands, with an explicit external `PAGRPO_DATA_ROOT`:
+
+```bash
+python -m scripts_permstudy.phase2.run_real_smoke plan \
+  --split-manifest split/7fa4a9a76ffb110f2004cdfe8998760bed48886c9571dc7a45c7d104a33cf942/manifest.json \
+  --recipe math-production-200-v1
+python -m scripts_permstudy.phase2.run_real_smoke plan \
+  --split-manifest split/7fa4a9a76ffb110f2004cdfe8998760bed48886c9571dc7a45c7d104a33cf942/manifest.json \
+  --recipe reclor-production-200-v1
+```
+
+These commands save existing-schema `generation/<run_id>/planned.json`, plans
+and selected questions in the private root. They do not construct an engine or
+create candidate/shard output. `planned.json` is not a completed generation
+manifest. After separate GPU authorization, the existing `generate` command
+uses the same recipe and split, once per model, and the existing runner handles
+resume. Verification, pairing and audit remain unchanged. Source-specific runs
+do not license combining candidates from different generation runs.
+
+MATH uses the verified concise reasoning prompt; ReClor uses the improved
+terminal `Final Answer: X` instruction for both models. Do not infer that the
+new 400 questions have been gold-preflighted or their future labels audited.
+Evaluate actual pair yield and screen selected positives for clearly faulty
+reasoning before training release. The eight AI-screened diagnostic MATH pairs
+remain provisional, not formally approved training data.
+
+### Controlled training output contract
+
+The frozen canonical exporter asks for bare A/B, whereas the four controlled
+training modes use the strict `thinking` parser requiring one `<answer>` tag.
+Do not change either frozen implementation. The Phase 2 `prepare-training`
+command reads a hash-validated canonical trainer export, preserves all pair,
+question, permutation, split and reward fields, and writes a separate versioned
+prompt-adapted Parquet under a new export identity. It replaces only the known
+direct system instruction and terminal output instruction; unknown templates
+fail closed. Its config binds the input export envelope, input Parquet hash,
+exact adapted instructions and upstream roles.
+
+```bash
+python -m scripts_permstudy.phase2.run_real_smoke prepare-training \
+  --trainer-manifest trainer_export/<canonical-export-run>/manifest.json
+```
+
+The output contract is `pairwise_judge_answer_tag_v1`: reasoning is allowed,
+followed by exactly one `<answer>A</answer>` or `<answer>B</answer>`, with
+nothing afterward. A small synthetic Parquet test checks preserved identities
+and strict-parser compatibility. No real training export was adapted during
+this preparation. The adapted manifest explicitly records
+`training_authorized=false`; conversion does not approve labels, override any
+failed Gate, or authorize training. GPU wiring and research training stay HOLD.
+
+The public CPU receipt is
+`artifacts/data_pipeline/phase2/production_200_per_source_preparation_20261015.json`.
+Full selected records, strata counts and planned manifests stay private.
