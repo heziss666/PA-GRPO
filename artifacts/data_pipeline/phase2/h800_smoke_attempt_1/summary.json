@@ -1,0 +1,30 @@
+{
+  "schema_version": "h800_smoke_attempt_v1",
+  "git_sha": "d0bc2afa9a59f9bbe8bc1dbe7ddc9e5ab7ca4c72",
+  "run_ids": {
+    "smoke_preparation": "01600655484852bda0643e05472eaa9a1579735c17d8586630b4cfe2e071674d"
+  },
+  "artifact_hashes": {
+    "smoke_parquet": "ca13e6c40464dfb31476a17fe9d4eb14b6d36c15dcba2bf4cba55bc2416444c0",
+    "private_training_log": "0a8ecb0fbe6327b126e404c73e77961cbf77259c7f5f96fc88fe8cd69288cd8d",
+    "private_resolved_config": "9c546c14c67efa4584fd1697ea2025a05b3320ab3e4371b103a51b1f9cdd3bfd"
+  },
+  "question_counts": {"math": 2, "reclor": 2},
+  "pair_count": 4,
+  "permutation_count": 8,
+  "completion_counts": {
+    "GPU_attempts": 1,
+    "worker_initialization_completed": 1,
+    "planned_optimizer_steps": 2,
+    "completed_optimizer_steps": 0,
+    "rollout_files": 0,
+    "checkpoint_directories": 0,
+    "automatic_retries": 0,
+    "restore_replays": 0,
+    "CPU_oom_events": 0,
+    "CPU_oom_kills": 0,
+    "GPU_used_MiB_after_failure": 0
+  },
+  "phase_status": "H800_SMOKE_BLOCKED_DEPENDENCY_TENSORBOARD",
+  "real_generation_performed": false
+}
