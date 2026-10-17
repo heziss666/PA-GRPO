@@ -1,0 +1,39 @@
+{
+  "schema_version": "h800_smoke_retry_v1",
+  "git_sha": "d0bc2afa9a59f9bbe8bc1dbe7ddc9e5ab7ca4c72",
+  "package_versions": {"tensorboard": "2.20.0", "torch": "2.6.0+cu124", "vllm": "0.8.5", "transformers": "4.57.1", "peft": "0.17.1"},
+  "run_ids": {
+    "smoke_preparation": "01600655484852bda0643e05472eaa9a1579735c17d8586630b4cfe2e071674d"
+  },
+  "artifact_hashes": {
+    "smoke_parquet": "ca13e6c40464dfb31476a17fe9d4eb14b6d36c15dcba2bf4cba55bc2416444c0",
+    "private_training_log": "3dfe5713e4a19bce810c0102d7f67700b6d594bc9ea0bfefb90ac5f4d6d6e312",
+    "private_resolved_config": "ad32e692a2c57086f79e38023a33358b5d281a64466f58ff5d8e59f4d0c07213",
+    "lora_step1": "4a15291bba432137d52f2e7e4bebb342bfbf56c702cd5be5033b81f7c0f0c159",
+    "lora_step2": "0055e0fbb14f8d81b51ef457750983c2377657e668aa12162d288bc3f1a364f4"
+  },
+  "question_counts": {"math": 2, "reclor": 2},
+  "pair_count": 4,
+  "permutation_count": 8,
+  "completion_counts": {
+    "GPU_attempts": 1,
+    "planned_optimizer_steps": 2,
+    "completed_optimizer_steps": 2,
+    "rollout_files": 2,
+    "rollout_records": 16,
+    "format_valid_records": 16,
+    "checkpoint_directories": 2,
+    "lora_tensors": 392,
+    "changed_lora_tensors_between_steps": 392,
+    "nonfinite_lora_tensors": 0,
+    "scalar_metric_tags": 74,
+    "nonfinite_scalar_metric_tags": 0,
+    "mirror_slot_groups": 8,
+    "unpaired_groups": 0,
+    "skipped_pair_groups": 0,
+    "restore_replays": 0,
+    "formal_training_runs": 0
+  },
+  "phase_status": "H800_GLOBAL_ONLY_TWO_STEP_SMOKE_PASS_RESTORE_PENDING",
+  "real_generation_performed": true
+}
