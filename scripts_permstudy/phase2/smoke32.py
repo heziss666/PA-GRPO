@@ -62,7 +62,7 @@ def select_short_pairs(rows, tokenizer):
     return result, selected_lengths
 
 
-def training_overrides(model, data, run):
+def training_overrides(model, data, run, *, project_root=None):
     """Configuration only; standalone ref BF16 is inactive for shared LoRA ref."""
     return [
         "algorithm.adv_estimator=grpo",
@@ -135,7 +135,7 @@ def training_overrides(model, data, run):
         f"trainer.default_local_dir={run}/checkpoints",
         f"trainer.rollout_data_dir={run}/rollouts",
         "reward_model.reward_manager=batch",
-        f"custom_reward_function.path={io.REPO.as_posix()}/my_reward/judge_qwen.py",
+        f"custom_reward_function.path={Path(project_root or io.REPO).as_posix()}/my_reward/judge_qwen.py",
         "custom_reward_function.name=compute_score",
     ]
 
@@ -189,7 +189,7 @@ def prepare(args, root):
             ["git", "rev-parse", "HEAD"], cwd=io.REPO, text=True
         ).strip(),
         "script_sha256": sha256_hex(Path(__file__).read_bytes()),
-        "overrides": training_overrides("MODEL", "DATA", "RUN"),
+        "overrides": training_overrides("MODEL", "DATA", "RUN", project_root="REPO"),
         "GPU_authorized": False,
         "historical_gate_status": "PASS_WITH_WARNINGS",
     }
@@ -237,7 +237,8 @@ def load_prepared(args, root):
         or sha256_hex(canonical_json_bytes(pq.read_table(data).to_pylist()))
         != config["row_semantic_sha256"]
         or config["script_sha256"] != sha256_hex(Path(__file__).read_bytes())
-        or config["overrides"] != training_overrides("MODEL", "DATA", "RUN")
+        or config["overrides"]
+        != training_overrides("MODEL", "DATA", "RUN", project_root="REPO")
         or sha256_hex(io.rooted(root, config["source_relative_path"]).read_bytes())
         != SOURCE_HASH
     ):

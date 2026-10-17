@@ -122,3 +122,14 @@ def test_launch_without_explicit_gpu_authorization_stops(tmp_path):
     with pytest.raises(io.PhaseBoundaryError):
         launch(SimpleNamespace(authorize_gpu=False), tmp_path)
     assert not list(tmp_path.iterdir())
+
+
+def test_portable_override_binding_does_not_capture_local_checkout(monkeypatch):
+    from pathlib import Path
+    from scripts_permstudy.phase2.smoke32 import training_overrides
+
+    monkeypatch.setattr(io, "REPO", Path("windows-checkout"))
+    first = training_overrides("MODEL", "DATA", "RUN", project_root="REPO")
+    monkeypatch.setattr(io, "REPO", Path("linux-checkout"))
+    assert training_overrides("MODEL", "DATA", "RUN", project_root="REPO") == first
+    assert "custom_reward_function.path=REPO/my_reward/judge_qwen.py" in first
