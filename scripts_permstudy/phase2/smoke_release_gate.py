@@ -214,6 +214,41 @@ def _read_records(path, record_type):
     ]
 
 
+def validate_prior_negative_checks(report, selected):
+    """Matching IDs alone do not establish a confirmed negative approval."""
+    if (
+        report.get("new_holds") != 0
+        or report.get("new_false_incorrect") != 0
+        or report.get("negative_checks") != len(selected)
+        or report.get("label_checked_pair_count") != len(selected)
+    ):
+        raise io.IntegrityError()
+    notes = report.get("notes", [])
+    indexed = {n["pair_id"]: n for n in notes}
+    if len(notes) != len(indexed) or set(indexed) != {p.pair_id for p in selected}:
+        raise io.IntegrityError()
+    for pair in selected:
+        expected = {
+            "math": "AI_CONTEXT_CHECKED_INCORRECT",
+            "reclor": "OFFICIAL_LABEL_IDENTITY_CHECKED_INCORRECT",
+        }.get(pair.source.value)
+        note = indexed[pair.pair_id]
+        if (
+            expected is None
+            or note.get("negative_label_check") != expected
+            or any(
+                note.get(field) != getattr(pair, field)
+                for field in (
+                    "original_question_id",
+                    "generation_run_id",
+                    "verification_run_id",
+                    "negative_candidate_id",
+                )
+            )
+        ):
+            raise io.IntegrityError()
+
+
 def load_checked_dataset(root):
     """Join the approved view to immutable artifacts and real screening records."""
     base = root / PREFIX
@@ -277,6 +312,7 @@ def load_checked_dataset(root):
         else:
             negative_file = directory / "retained-negative-label-check.json"
             negative = io.read_json(negative_file)
+            validate_prior_negative_checks(negative, selected)
             hashes[f"negative_check_{ver}"] = sha256_hex(negative_file.read_bytes())
             allowed = {
                 n["pair_id"]

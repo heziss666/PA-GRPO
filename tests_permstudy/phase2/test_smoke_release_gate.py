@@ -2,6 +2,8 @@
 
 import numpy as np
 import pytest
+from copy import deepcopy
+from types import SimpleNamespace
 
 
 def test_format_features_do_not_encode_words_numbers_or_option_identity():
@@ -101,3 +103,68 @@ def test_cli_help_and_isolation_fail_closed_without_data_access(tmp_path, capsys
     assert "smoke_release_gate" in capsys.readouterr().out
     assert main(["--data-root", "."]) == 2
     assert "contract_error" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        None,
+        "held",
+        "false_label",
+        "unconfirmed",
+        "candidate",
+        "question",
+        "run",
+        "duplicate",
+    ],
+)
+def test_old_negative_approval_requires_confirmed_verdict_and_exact_identity(mutation):
+    from scripts_permstudy.phase2.smoke_release_gate import (
+        validate_prior_negative_checks,
+    )
+    from scripts_permstudy.data._common import IntegrityError
+
+    pair = SimpleNamespace(
+        pair_id="synthetic-pair",
+        original_question_id="synthetic-question",
+        generation_run_id="synthetic-generation",
+        verification_run_id="synthetic-verification",
+        negative_candidate_id="synthetic-negative",
+        source=SimpleNamespace(value="math"),
+    )
+    payload = {
+        "new_holds": 0,
+        "new_false_incorrect": 0,
+        "negative_checks": 1,
+        "label_checked_pair_count": 1,
+        "notes": [
+            {
+                "pair_id": "synthetic-pair",
+                "original_question_id": "synthetic-question",
+                "generation_run_id": "synthetic-generation",
+                "verification_run_id": "synthetic-verification",
+                "negative_candidate_id": "synthetic-negative",
+                "negative_label_check": "AI_CONTEXT_CHECKED_INCORRECT",
+            }
+        ],
+    }
+    bad = deepcopy(payload)
+    if mutation == "held":
+        bad["new_holds"] = 1
+    elif mutation == "false_label":
+        bad["new_false_incorrect"] = 1
+    elif mutation == "unconfirmed":
+        bad["notes"][0]["negative_label_check"] = "UNSURE"
+    elif mutation == "candidate":
+        bad["notes"][0]["negative_candidate_id"] = "foreign"
+    elif mutation == "question":
+        bad["notes"][0]["original_question_id"] = "foreign"
+    elif mutation == "run":
+        bad["notes"][0]["generation_run_id"] = "foreign"
+    elif mutation == "duplicate":
+        bad["notes"].append(deepcopy(bad["notes"][0]))
+    if mutation is None:
+        validate_prior_negative_checks(payload, [pair])
+    else:
+        with pytest.raises(IntegrityError):
+            validate_prior_negative_checks(bad, [pair])
