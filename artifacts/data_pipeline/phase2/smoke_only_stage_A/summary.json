@@ -1,0 +1,31 @@
+{
+  "artifact_hashes": {
+    "cpu_gate_report": "2a632507f0a820bbe2780368a350c693a1e5a999273704f44f48cb930850ac72",
+    "export_receipt": "a6c9475e5ffb0b9769d50c54348b7a4a84623608df6d0801a27f80626fdb3c50",
+    "frozen_pairs": "db0f294450144c9553a848f3ce1d436551824b0ee18ee97c387adec7bbf2988b",
+    "frozen_permutations": "5505e619af505e7f8581ae839f8494d2f5cc69ccf3a3aad07c3a8f4acba74c20",
+    "parquet": "15b3b0944fed63d8269109c05df5298e768bde9a87455b8e0e5c60e919ce06fb",
+    "trainer_rows": "11bfdb30ee6ff459a3c16b006098f4b153b2c7776e5fbe6ebd43dd498798e4f8"
+  },
+  "completion_counts": {
+    "GPU_runs": 0,
+    "parquet_exported": 1,
+    "roundtrip_rows": 760,
+    "training_steps": 0,
+    "unsure_restored": 0
+  },
+  "git_sha": "711ca485b4dba00bd3e0d0acd7acb65914a3453f",
+  "pair_count": 380,
+  "permutation_count": 760,
+  "phase_status": "SMOKE_ONLY_NOT_FOR_FORMAL_EXPERIMENT_MATH_WARN_ACCEPTED",
+  "question_counts": {
+    "math": 146,
+    "reclor": 234
+  },
+  "real_generation_performed": false,
+  "run_ids": {
+    "cpu_gate": "7d4c4f9812f89a26133677baf84a33a988df99f23b3c3b7d86da815fd78e3421",
+    "smoke_only_export": "ad8355ce93da7a1050ac95d628f3b905b188761673f2238a56197b72d31031e1"
+  },
+  "schema_version": "smoke_only_stage_A_v1"
+}
