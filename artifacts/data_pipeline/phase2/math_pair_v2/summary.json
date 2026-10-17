@@ -1,0 +1,33 @@
+{
+  "artifact_hashes": {
+    "diagnostic": "15df25c5d2e8c1bcec94aa989a99da2d32fbd765fba22a2856315e985e269d90",
+    "pairs": "408e21a308c9ae9a775472e75d579577f55490a1174b5f986d114dcc167b7db5",
+    "quality_decisions": "85974bb45a289c0d7f61f9406dbb856f17ecaadc154d72fc6f42f7691291c19f"
+  },
+  "completion_counts": {
+    "GPU_runs": 0,
+    "accepted_replacements": 36,
+    "added_pairs": 0,
+    "diagnostic_executions": 1,
+    "fallback_to_original": 11,
+    "lost_math_pairs": 0,
+    "original_math_pairs": 146,
+    "parquet_exports": 0,
+    "proposed_replacements": 47,
+    "restored_unsure": 0,
+    "retained_math_pairs": 146,
+    "same_generator_after": 79,
+    "same_generator_before": 57
+  },
+  "git_sha": "0db9828d727dbde4341e746a4e23d8d795eed27e",
+  "pair_count": 146,
+  "permutation_count": 292,
+  "phase_status": "MATH_PAIR_V2_CPU_COMPLETE_REVIEW_PENDING",
+  "question_counts": {"math": 146},
+  "real_generation_performed": false,
+  "run_ids": {
+    "pair_v2": "4cff87b9b6681965e56b05763bf5b1a4b70f88a42399a457abfb0f4029a71c0b",
+    "selection": "1cb559d089b3116d9bbc584ba39c62478805801df590798dc47030b3b6bef393"
+  },
+  "schema_version": "math_pair_v2_equal_five_factors_v1"
+}
