@@ -49,16 +49,26 @@ PROMPT_TEMPLATE_REVISION = f"phase2_real_candidate_prompt_v1+{REQUEST_SEED_VERSI
 LLAMA_RECLOR_PROMPT_REVISION = f"phase2_llama_reclor_prompt_v2+{REQUEST_SEED_VERSION}"
 MATH_COMPLETION_PROMPT_REVISION = f"phase2_math_completion_v2+{REQUEST_SEED_VERSION}"
 PRODUCTION_SELECTION_VERSION = "fresh_train_stratified_200_seed42_v1"
+EXPANSION_SELECTION_VERSION = (
+    "fresh_train_stratified_500_exclude_production200_seed42_v2"
+)
 _PRODUCTION_SOURCES = {
     "math-production-200-v1": Source.MATH,
     "reclor-production-200-v1": Source.RECLOR,
+    "math-production-500-v2": Source.MATH,
+    "reclor-production-500-v2": Source.RECLOR,
 }
+_EXPANSION_RECIPES = frozenset({"math-production-500-v2", "reclor-production-500-v2"})
 _RECIPE_PROMPT_REVISIONS = {
     "smoke-v1": PROMPT_TEMPLATE_REVISION,
     "llama-reclor-prompt-v2": LLAMA_RECLOR_PROMPT_REVISION,
     "math-completion-v2": MATH_COMPLETION_PROMPT_REVISION,
     **{
-        recipe: f"phase2_{source.value}_production_200_v1+{REQUEST_SEED_VERSION}"
+        recipe: (
+            f"phase2_{source.value}_production_500_v2+{REQUEST_SEED_VERSION}"
+            if recipe in _EXPANSION_RECIPES
+            else f"phase2_{source.value}_production_200_v1+{REQUEST_SEED_VERSION}"
+        )
         for recipe, source in _PRODUCTION_SOURCES.items()
     },
 }
@@ -173,19 +183,26 @@ def prompt_contract_hash(
     )
     if recipe in _PRODUCTION_SOURCES:
         selection = {
-            "selection_algorithm": PRODUCTION_SELECTION_VERSION,
+            "selection_algorithm": EXPANSION_SELECTION_VERSION
+            if recipe in _EXPANSION_RECIPES
+            else PRODUCTION_SELECTION_VERSION,
             "selection_seed": 42,
-            "per_source": 200,
+            "per_source": 500 if recipe in _EXPANSION_RECIPES else 200,
             "source": _PRODUCTION_SOURCES[recipe].value,
             "exclude_original_smoke": True,
             "exclude_math_fresh_ids": sorted(MATH_COMPLETION_NEW_IDS),
         }
+        if recipe in _EXPANSION_RECIPES:
+            selection["exclude_prior_production_selection"] = (
+                PRODUCTION_SELECTION_VERSION
+            )
     return sha256_hex(
         canonical_json_bytes(
             {
                 "math_system": (
                     MATH_COMPLETION_SYSTEM_PROMPT
-                    if recipe in ("math-completion-v2", "math-production-200-v1")
+                    if recipe == "math-completion-v2"
+                    or _PRODUCTION_SOURCES.get(recipe) is Source.MATH
                     else MATH_SYSTEM_PROMPT
                 ),
                 "math_user": "{problem}",
@@ -196,7 +213,8 @@ def prompt_contract_hash(
                 )
                 + (
                     RECLOR_OUTPUT_RULES
-                    if recipe in ("llama-reclor-prompt-v2", "reclor-production-200-v1")
+                    if recipe == "llama-reclor-prompt-v2"
+                    or _PRODUCTION_SOURCES.get(recipe) is Source.RECLOR
                     else ""
                 ),
                 "request_seed_version": request_seed_version,
@@ -232,7 +250,8 @@ def build_real_generation_configs(
             temperature=0.8,
             top_p=0.95,
             max_new_tokens=1024
-            if recipe in ("math-completion-v2", "math-production-200-v1")
+            if recipe == "math-completion-v2"
+            or _PRODUCTION_SOURCES.get(recipe) is Source.MATH
             else 512,
             seed=42,
             batch_size=batch_size,
@@ -295,14 +314,17 @@ def render_messages(
     if prompt_template_revision not in _RECIPE_PROMPT_REVISIONS.values():
         raise GenerationConfigurationError("unknown prompt revision")
     diagnostic = prompt_template_revision == LLAMA_RECLOR_PROMPT_REVISION
-    reclor_production = (
-        prompt_template_revision == _RECIPE_PROMPT_REVISIONS["reclor-production-200-v1"]
-    )
+    reclor_production = prompt_template_revision in {
+        _RECIPE_PROMPT_REVISIONS[name]
+        for name, source in _PRODUCTION_SOURCES.items()
+        if source is Source.RECLOR
+    }
     if (diagnostic or reclor_production) and question.source is not Source.RECLOR:
         raise GenerationConfigurationError("Llama prompt diagnostic requires ReClor")
     math_completion = prompt_template_revision in (
         MATH_COMPLETION_PROMPT_REVISION,
         _RECIPE_PROMPT_REVISIONS["math-production-200-v1"],
+        _RECIPE_PROMPT_REVISIONS["math-production-500-v2"],
     )
     if math_completion and question.source is not Source.MATH:
         raise GenerationConfigurationError("MATH completion diagnostic requires MATH")
@@ -649,13 +671,24 @@ def load_phase2_split(root: Path, manifest: Mapping[str, object], *, recipe="smo
         excluded = {a.original_question_id for a in smoke} | set(
             MATH_COMPLETION_NEW_IDS
         )
+        if recipe in _EXPANSION_RECIPES:
+            prior = select_smoke_questions(
+                tuple(
+                    a
+                    for a in result.assignments
+                    if a.original_question_id not in excluded
+                ),
+                per_source=200,
+                split_seed=42,
+            )
+            excluded.update(a.original_question_id for a in prior)
         # Reuse the existing proportional-stratum allocation. This selects a
         # subset of the frozen training split; it never creates another split.
         fresh = select_smoke_questions(
             tuple(
                 a for a in result.assignments if a.original_question_id not in excluded
             ),
-            per_source=200,
+            per_source=500 if recipe in _EXPANSION_RECIPES else 200,
             split_seed=42,
         )
         chosen = tuple(a for a in fresh if a.source is _PRODUCTION_SOURCES[recipe])
@@ -724,9 +757,10 @@ def _generation_plan(
                 "MATH diagnostic question selection differs"
             )
     elif recipe in _PRODUCTION_SOURCES:
+        required_count = 500 if recipe in _EXPANSION_RECIPES else 200
         if (
-            len(smoke) != 200
-            or len({a.original_question_id for a in smoke}) != 200
+            len(smoke) != required_count
+            or len({a.original_question_id for a in smoke}) != required_count
             or any(
                 a.source is not _PRODUCTION_SOURCES[recipe]
                 or a.split.value != "train"

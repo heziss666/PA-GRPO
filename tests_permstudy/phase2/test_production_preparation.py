@@ -210,6 +210,104 @@ def test_training_adapter_preserves_identity_and_matches_strict_reward_parser():
         cli.controlled_training_rows(rows)
 
 
+@pytest.mark.parametrize("source", ["math", "reclor"])
+def test_expansion_selects_500_new_train_questions_excluding_prior_production(
+    source, monkeypatch, tmp_path
+):
+    from scripts_permstudy.data import _common as io, plan_generation as phase1
+    from scripts_permstudy.phase2 import run_real_smoke as cli
+
+    questions, assignments, old_smoke = production_pool()
+    more = tuple(
+        factory(i + 1000)
+        for factory in (math_question, reclor_question)
+        for i in range(700)
+    )
+    questions += more
+    assignments += tuple(
+        replace(assignment(q), stratum=f"cell={i % 2}") for i, q in enumerate(more)
+    )
+    monkeypatch.setattr(io, "records", lambda *args: list(questions))
+    monkeypatch.setattr(
+        phase1,
+        "load_split",
+        lambda *args: (SimpleNamespace(assignments=assignments), old_smoke),
+    )
+    split = {"split_manifest_hash": cli.MATH_COMPLETION_SPLIT_HASH}
+    prior, _ = cli.load_phase2_split(
+        tmp_path, split, recipe=f"{source}-production-200-v1"
+    )
+    selected, chosen = cli.load_phase2_split(
+        tmp_path, split, recipe=f"{source}-production-500-v2"
+    )
+    assert len(selected) == len(chosen) == 500
+    assert len({q.original_question_id for q in selected}) == 500
+    assert {q.original_question_id for q in prior}.isdisjoint(
+        q.original_question_id for q in selected
+    )
+    assert Counter(a.stratum for a in chosen) == {"cell=0": 250, "cell=1": 250}
+    assert all(a.split is Split.TRAIN and a.source.value == source for a in chosen)
+    assert (
+        {a.original_question_id for a in old_smoke} | set(cli.MATH_COMPLETION_NEW_IDS)
+    ).isdisjoint(q.original_question_id for q in selected)
+    monkeypatch.setattr(
+        phase1,
+        "load_split",
+        lambda *args: (
+            SimpleNamespace(assignments=tuple(reversed(assignments))),
+            old_smoke,
+        ),
+    )
+    assert cli.load_phase2_split(
+        tmp_path, split, recipe=f"{source}-production-500-v2"
+    ) == (selected, chosen)
+
+
+@pytest.mark.parametrize("source,budget", [("math", 1024), ("reclor", 512)])
+def test_expansion_plan_preserves_decoding_prompt_and_binds_new_cohort(source, budget):
+    from scripts_permstudy.phase2 import run_real_smoke as cli
+
+    factory = math_question if source == "math" else reclor_question
+    selected = tuple(assignment(factory(i + 1000)) for i in range(500))
+    split = {
+        "split_manifest_hash": cli.MATH_COMPLETION_SPLIT_HASH,
+        "output_manifest_hash": "3" * 64,
+    }
+    plan = cli._generation_plan(split, selected, recipe=f"{source}-production-500-v2")
+    assert len({p.key for p in plan.candidates}) == 2000
+    assert Counter(p.generator_id for p in plan.candidates) == {
+        "qwen2.5-7b-instruct": 1000,
+        "llama-3.1-8b-instruct": 1000,
+    }
+    old = cli.build_real_generation_configs(
+        split["split_manifest_hash"], recipe=f"{source}-production-200-v1"
+    )
+    for config, prior in zip(plan.generator_configs, old, strict=True):
+        cli._validate_phase2_config(config)
+        assert (
+            config.temperature,
+            config.top_p,
+            config.max_new_tokens,
+            config.batch_size,
+            config.max_model_len,
+            config.gpu_memory_utilization,
+        ) == (0.8, 0.95, budget, 8, 4096, 0.85)
+        assert config.prompt_template_hash != prior.prompt_template_hash
+        assert cli.render_messages(
+            factory(1000), prompt_template_revision=config.prompt_template_revision
+        ) == cli.render_messages(
+            factory(1000), prompt_template_revision=prior.prompt_template_revision
+        )
+    with pytest.raises(ValueError):
+        cli._generation_plan(split, selected[:-1], recipe=f"{source}-production-500-v2")
+    with pytest.raises(ValueError):
+        cli._generation_plan(
+            split,
+            tuple(replace(a, split=Split.INTERNAL_HOLDOUT) for a in selected),
+            recipe=f"{source}-production-500-v2",
+        )
+
+
 def test_training_command_writes_separate_hash_bound_parquet(monkeypatch, tmp_path):
     import io as buffers
     import pyarrow as pa
