@@ -1,0 +1,26 @@
+{
+  "schema_version": "smoke32_cpu_preparation_v1",
+  "git_sha": "d0bc2afa9a59f9bbe8bc1dbe7ddc9e5ab7ca4c72",
+  "run_ids": {
+    "smoke32_preparation": "01600655484852bda0643e05472eaa9a1579735c17d8586630b4cfe2e071674d"
+  },
+  "artifact_hashes": {
+    "stage_A_parquet": "15b3b0944fed63d8269109c05df5298e768bde9a87455b8e0e5c60e919ce06fb",
+    "stage_A_receipt": "a6c9475e5ffb0b9769d50c54348b7a4a84623608df6d0801a27f80626fdb3c50",
+    "smoke32_parquet": "ca13e6c40464dfb31476a17fe9d4eb14b6d36c15dcba2bf4cba55bc2416444c0",
+    "smoke32_rows": "fd8f5f867f23346b621d9280d11257107c436b35cf94c1b59614203bb731988e"
+  },
+  "question_counts": {"math": 2, "reclor": 2},
+  "pair_count": 4,
+  "permutation_count": 8,
+  "completion_counts": {
+    "prepared_rows": 8,
+    "remote_dataset_rows": 8,
+    "CPU_identity_expansion_rows": 16,
+    "GPU_runs": 0,
+    "training_steps": 0,
+    "unsure_restored": 0
+  },
+  "phase_status": "SMOKE32_CPU_PREPARED_GPU_UNVERIFIED",
+  "real_generation_performed": false
+}
